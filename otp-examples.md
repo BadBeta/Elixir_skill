@@ -2157,3 +2157,688 @@ case :global.whereis_name(:my_service) do
     end
 end
 ```
+
+---
+
+## Production OTP Patterns
+
+### Data Buffering with Batch Flush
+
+> Based on: [Broadway BatcherStage](https://github.com/dashbitco/broadway) — timer-based batch flushing with proper cancellation, and [Logflare HttpBackend](https://github.com/Logflare/logflare_logger_backend) — periodic flush with batch size cap.
+
+Two-process pattern: collector accepts events without blocking, flusher drains on timer or when batch is full. Supervisor ensures ordering (collector starts before flusher).
+
+```elixir
+defmodule MyApp.EventCollector do
+  @moduledoc """
+  Buffers events in ETS for concurrent writes without GenServer bottleneck.
+  Flushed periodically by EventFlusher or when batch size exceeded.
+  """
+  use GenServer
+
+  @batch_limit 10_000    # hard cap prevents runaway memory
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Direct ETS write — no GenServer call on the hot path
+  def record(event) do
+    count = :ets.update_counter(__MODULE__, :count, {2, 1})
+    :ets.insert(__MODULE__, {make_ref(), event})
+    if count >= @batch_limit, do: send(__MODULE__, :flush_now)
+    :ok
+  end
+
+  def flush do
+    GenServer.call(__MODULE__, :flush)
+  end
+
+  @impl true
+  def init(_opts) do
+    :ets.new(__MODULE__, [:named_table, :public, :bag, write_concurrency: true])
+    :ets.insert(__MODULE__, {:count, 0})
+    {:ok, %{}}
+  end
+
+  @impl true
+  def handle_call(:flush, _from, state) do
+    events = drain_events()
+    {:reply, events, state}
+  end
+
+  @impl true
+  def handle_info(:flush_now, state) do
+    events = drain_events()
+    if events != [], do: persist_events(events)
+    {:noreply, state}
+  end
+
+  defp drain_events do
+    # Atomically grab all events and reset counter
+    events =
+      :ets.tab2list(__MODULE__)
+      |> Enum.reject(fn {key, _} -> key == :count end)
+      |> Enum.map(fn {_ref, event} -> event end)
+
+    :ets.delete_all_objects(__MODULE__)
+    :ets.insert(__MODULE__, {:count, 0})
+    events
+  end
+
+  defp persist_events(events) do
+    Logger.info("Persisting #{length(events)} events")
+  end
+end
+
+defmodule MyApp.EventFlusher do
+  @moduledoc """
+  Periodic flusher — drains the collector on a timer.
+  Timer managed with proper cancellation to avoid stale messages.
+  """
+  use GenServer
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @impl true
+  def init(opts) do
+    interval = Keyword.get(opts, :flush_interval, 5_000)
+    {:ok, %{interval: interval}, {:continue, :schedule}}
+  end
+
+  @impl true
+  def handle_continue(:schedule, state) do
+    timer = :erlang.start_timer(state.interval, self(), :flush)
+    {:noreply, Map.put(state, :timer, timer)}
+  end
+
+  @impl true
+  def handle_info({:timeout, _ref, :flush}, state) do
+    events = MyApp.EventCollector.flush()
+    if events != [], do: persist_batch(events)
+    {:noreply, state, {:continue, :schedule}}
+  end
+
+  defp persist_batch(events) do
+    # Insert to database, send to external API, etc.
+    Logger.info("Flushing batch of #{length(events)} events")
+  end
+end
+
+defmodule MyApp.EventSupervisor do
+  use Supervisor
+
+  def start_link(opts) do
+    Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  @impl true
+  def init(opts) do
+    children = [
+      {MyApp.EventCollector, opts},     # Must start before flusher
+      {MyApp.EventFlusher, opts}
+    ]
+    Supervisor.init(children, strategy: :rest_for_one)  # restart flusher if collector crashes
+  end
+end
+```
+
+### Rate Limiter with Deferred Replies
+
+> Based on: [Finch HTTP/2 Pool](https://github.com/sneako/finch) — deferred replies via monitoring + send (not GenServer.reply), and [Broadway RateLimiter](https://github.com/dashbitco/broadway) — `:atomics` for lock-free rate counting with periodic refill.
+
+Two approaches: GenServer with `:queue` for simple cases, `:atomics` for high-throughput.
+
+```elixir
+defmodule MyApp.RateLimiter do
+  @moduledoc """
+  Leaky bucket rate limiter with deferred replies.
+  Callers block until their slot opens. Uses :queue for fair ordering.
+  """
+  use GenServer
+
+  def start_link(opts) do
+    name = Keyword.fetch!(opts, :name)
+    GenServer.start_link(__MODULE__, opts, name: via(name))
+  end
+
+  def wait(name) do
+    GenServer.call(via(name), :wait, :infinity)
+  end
+
+  @impl true
+  def init(opts) do
+    rps = Keyword.fetch!(opts, :requests_per_second)
+    interval = div(:timer.seconds(1), rps)
+    {:ok, %{queue: :queue.new(), length: 0, interval: interval}}
+  end
+
+  @impl true
+  def handle_call(:wait, from, state) do
+    # Don't reply — caller stays blocked
+    queue = :queue.in(from, state.queue)
+    state = %{state | queue: queue, length: state.length + 1}
+
+    # Start draining if this is the first waiter
+    if state.length == 1 do
+      {:noreply, state, {:continue, :drain}}
+    else
+      {:noreply, state}
+    end
+  end
+
+  @impl true
+  def handle_continue(:drain, state) do
+    Process.send_after(self(), :release_next, state.interval)
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:release_next, %{length: 0} = state), do: {:noreply, state}
+  def handle_info(:release_next, state) do
+    {{:value, caller}, queue} = :queue.out(state.queue)
+    GenServer.reply(caller, :ok)    # unblocks the waiting caller
+    state = %{state | queue: queue, length: state.length - 1}
+
+    if state.length > 0 do
+      {:noreply, state, {:continue, :drain}}
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp via(name), do: {:via, Registry, {MyApp.RateLimiter.Registry, name}}
+end
+
+# High-throughput alternative: lock-free atomics (from Broadway)
+defmodule MyApp.AtomicRateLimiter do
+  @moduledoc """
+  Lock-free rate limiter using :atomics — no GenServer on the hot path.
+  A background timer refills the bucket periodically.
+  """
+  use GenServer
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Hot path — no GenServer call, just atomic decrement
+  def check_rate(count \\ 1) do
+    case :atomics.sub_get(counter(), 1, count) do
+      remaining when remaining >= 0 -> :ok
+      _ ->
+        :atomics.add(counter(), 1, count)    # restore the over-decrement
+        {:error, :rate_limited}
+    end
+  end
+
+  @impl true
+  def init(opts) do
+    limit = Keyword.fetch!(opts, :limit)
+    interval = Keyword.get(opts, :interval, 1_000)
+    ref = :atomics.new(1, signed: true)
+    :persistent_term.put({__MODULE__, :counter}, ref)
+    :atomics.put(ref, 1, limit)
+    schedule_refill(interval)
+    {:ok, %{limit: limit, interval: interval}}
+  end
+
+  @impl true
+  def handle_info(:refill, state) do
+    :atomics.put(counter(), 1, state.limit)
+    schedule_refill(state.interval)
+    {:noreply, state}
+  end
+
+  defp counter, do: :persistent_term.get({__MODULE__, :counter})
+  defp schedule_refill(interval), do: Process.send_after(self(), :refill, interval)
+end
+```
+
+### Persistent Term Hydration
+
+> Based on: [Broadway ConfigStorage.PersistentTerm](https://github.com/dashbitco/broadway) — write once, never erase (avoids global GC), and [Phoenix.PubSub.PG2](https://github.com/phoenixframework/phoenix_pubsub) — stores pool groups in persistent_term for zero-cost reads.
+
+**Key insight from production:** Never use `:persistent_term.erase/1` — it triggers a global GC scan of all processes. Production code writes once during supervisor init and leaves values in place.
+
+```elixir
+defmodule MyApp.ConfigStorage do
+  @moduledoc """
+  Stores app config in :persistent_term for zero-cost reads.
+  Write once during supervisor init — never erase.
+
+  Based on Broadway's ConfigStorage which intentionally skips deletion:
+  'the amount of memory it uses is negligible to justify the process
+  purging done by persistent_term'
+  """
+
+  @behaviour MyApp.ConfigStorage.Behaviour
+
+  @impl true
+  def put(key, value) do
+    :persistent_term.put({__MODULE__, key}, value)
+  end
+
+  @impl true
+  def get(key) do
+    :persistent_term.get({__MODULE__, key}, nil)
+  end
+
+  @impl true
+  def get!(key) do
+    :persistent_term.get({__MODULE__, key})
+  end
+
+  # Intentionally no delete — :persistent_term.erase triggers global GC
+end
+
+# Phoenix PubSub pattern: store a tuple for O(1) pool selection
+defmodule MyApp.Pool do
+  @moduledoc """
+  Connection pool with persistent_term-backed group selection.
+  Based on Phoenix.PubSub.PG2 — consistent hashing via :erlang.phash2.
+  """
+
+  def init_pool(name, pool_size) do
+    groups = for i <- 0..(pool_size - 1), do: :"#{name}_#{i}"
+    :persistent_term.put({__MODULE__, name}, List.to_tuple(groups))
+  end
+
+  # Zero-cost read on every request — no GenServer call
+  def select_worker(name) do
+    groups = :persistent_term.get({__MODULE__, name})
+    index = :erlang.phash2(self(), tuple_size(groups))
+    elem(groups, index)
+  end
+end
+
+# Hydrator pattern for blocking supervisor init
+defmodule MyApp.ConfigHydrator do
+  @moduledoc """
+  Blocks supervision tree until config is loaded, then exits.
+  Use `restart: :transient` so supervisor continues after :ignore.
+  """
+  use GenServer, restart: :transient
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @impl true
+  def init(opts) do
+    source = Keyword.get(opts, :source, :default)
+    hydrate(source)
+    :ignore    # process exits, supervisor continues
+  end
+
+  defp hydrate(:default) do
+    %{feature_flags: %{beta: false}, rate_limits: %{api: 100}}
+    |> Enum.each(fn {k, v} -> MyApp.ConfigStorage.put(k, v) end)
+  end
+
+  defp hydrate({:file, path}) do
+    path |> File.read!() |> Jason.decode!()
+    |> Enum.each(fn {k, v} -> MyApp.ConfigStorage.put(String.to_atom(k), v) end)
+  end
+end
+```
+
+### ETS with DETS Persistence
+
+> Based on: [ExRated](https://github.com/grempe/ex_rated) — public ETS for concurrent reads without GenServer bottleneck, DETS sync only on termination, match specs for efficient pruning.
+
+```elixir
+defmodule MyApp.PersistentCache do
+  @moduledoc """
+  Hybrid ETS+DETS cache. ETS is the hot path with public concurrent reads.
+  DETS backup happens on termination only — not on every write.
+  Based on ExRated's production pattern.
+  """
+  use GenServer
+
+  @ets_opts [:named_table, :public, :set, read_concurrency: true, write_concurrency: true]
+  @dets_file ~c"priv/cache.dets"
+  @prune_interval :timer.minutes(5)
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Public ETS reads — no GenServer bottleneck
+  def get(key) do
+    case :ets.lookup(__MODULE__, key) do
+      [{^key, value, expires_at}] ->
+        if System.monotonic_time(:millisecond) < expires_at,
+          do: {:ok, value},
+          else: (delete(key); :error)
+      [] -> :error
+    end
+  end
+
+  # Direct ETS write — concurrent-safe via write_concurrency
+  def put(key, value, ttl_ms \\ :timer.minutes(5)) do
+    expires_at = System.monotonic_time(:millisecond) + ttl_ms
+    :ets.insert(__MODULE__, {key, value, expires_at})
+    :ok
+  end
+
+  def delete(key) do
+    :ets.delete(__MODULE__, key)
+    :ok
+  end
+
+  @impl true
+  def init(opts) do
+    Process.flag(:trap_exit, true)    # ensure terminate/2 runs for DETS sync
+    :ets.new(__MODULE__, @ets_opts)
+
+    dets_file = Keyword.get(opts, :dets_file, @dets_file)
+    {:ok, dets} = :dets.open_file(__MODULE__, file: dets_file, type: :set, repair: true)
+    :dets.to_ets(dets, __MODULE__)     # hydrate ETS from DETS
+
+    :timer.send_interval(@prune_interval, :prune)
+    {:ok, %{dets: dets}}
+  end
+
+  @impl true
+  def handle_info(:prune, state) do
+    # Compiled match spec for efficient batch deletion of expired entries
+    now = System.monotonic_time(:millisecond)
+    :ets.select_delete(__MODULE__, [
+      {{:_, :_, :"$1"}, [{:<, :"$1", now}], [true]}
+    ])
+    {:noreply, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    # Persist to DETS only on shutdown — not on every write
+    :ets.to_dets(__MODULE__, state.dets)
+    :dets.close(state.dets)
+  end
+end
+```
+
+### Global Registration (Cluster-Wide Singleton)
+
+> Based on: [arjan/singleton](https://github.com/arjan/singleton) — watchdog manager on every node, jittered restart delay to prevent thundering herd, monitoring of remote winner.
+
+```elixir
+defmodule MyApp.Singleton.Manager do
+  @moduledoc """
+  Runs on EVERY node. Tries to start the singleton globally.
+  If another node wins, monitors the remote process and retries on :DOWN.
+  Jittered delay prevents thundering herd after a failover.
+
+  Based on arjan/singleton.
+  """
+  use GenServer, restart: :transient
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts)
+  end
+
+  @impl true
+  def init(opts) do
+    mod = Keyword.fetch!(opts, :module)
+    args = Keyword.get(opts, :args, [])
+    name = Keyword.get(opts, :name, mod)
+
+    state = %{mod: mod, args: args, name: {:global, name}, monitor: nil}
+    {:ok, state, {:continue, :try_start}}
+  end
+
+  @impl true
+  def handle_continue(:try_start, state) do
+    case GenServer.start_link(state.mod, state.args, name: state.name) do
+      {:ok, pid} ->
+        # We are the leader — monitor our own child
+        ref = Process.monitor(pid)
+        {:noreply, %{state | monitor: ref}}
+
+      {:error, {:already_started, pid}} ->
+        # Another node won — monitor the remote winner
+        ref = Process.monitor(pid)
+        {:noreply, %{state | monitor: ref}}
+    end
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{monitor: ref} = state) do
+    # Singleton died — jittered delay before retrying to prevent thundering herd
+    delay = :rand.uniform(5_000) + 5_000
+    Process.send_after(self(), :retry, delay)
+    {:noreply, %{state | monitor: nil}}
+  end
+
+  @impl true
+  def handle_info(:retry, state) do
+    {:noreply, state, {:continue, :try_start}}
+  end
+end
+
+# Example singleton service
+defmodule MyApp.GlobalService do
+  use GenServer
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  # Call via :global name — works from any node
+  def call(name \\ __MODULE__, request) do
+    GenServer.call({:global, name}, request)
+  end
+
+  @impl true
+  def init(opts), do: {:ok, %{started_at: DateTime.utc_now(), opts: opts}}
+
+  @impl true
+  def handle_call(:status, _from, state), do: {:reply, {:ok, state}, state}
+end
+
+# In application supervisor — every node runs the manager
+children = [
+  {MyApp.Singleton.Manager, module: MyApp.GlobalService, name: :global_service}
+]
+```
+
+### Process Groups (Replicated Service)
+
+> Based on: [Oban.Notifiers.PG](https://github.com/oban-bg/oban) — module-scoped :pg for isolation, write-to-all/read-local, and [Phoenix.PubSub.PG2](https://github.com/phoenixframework/phoenix_pubsub) — separate local vs remote delivery paths.
+
+```elixir
+defmodule MyApp.ReplicatedCache do
+  @moduledoc """
+  Cache replicated across cluster nodes using :pg process groups.
+  Writes broadcast to all members, reads from local process only.
+
+  Based on Oban.Notifiers.PG (module-scoped :pg) and
+  Phoenix.PubSub.PG2 (separate local/remote delivery).
+  """
+  use GenServer
+
+  @pg_scope __MODULE__
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  # Write to ALL replicas across the cluster
+  def put(key, value) do
+    message = {:put, key, value}
+    members = :pg.get_members(@pg_scope, @pg_scope)
+
+    # Separate local vs remote — Phoenix PubSub pattern
+    local = Enum.filter(members, &(node(&1) == node()))
+    remote = Enum.filter(members, &(node(&1) != node()))
+
+    Enum.each(local, &send(&1, message))
+    Enum.each(remote, &send(&1, message))
+  end
+
+  # Read from LOCAL replica only — no network hop
+  def get(key) do
+    GenServer.call(__MODULE__, {:get, key})
+  end
+
+  @impl true
+  def init(_opts) do
+    # Start module-scoped :pg for isolation from other groups
+    {:ok, _} = :pg.start_link(@pg_scope)
+    :ok = :pg.join(@pg_scope, @pg_scope, self())
+    {:ok, %{cache: %{}}}
+  end
+
+  @impl true
+  def handle_call({:get, key}, _from, state) do
+    {:reply, Map.get(state.cache, key), state}
+  end
+
+  @impl true
+  def handle_info({:put, key, value}, state) do
+    {:noreply, %{state | cache: Map.put(state.cache, key, value)}}
+  end
+end
+```
+
+### Network Partition Detection
+
+> Based on: [Livebook NodeManager](https://github.com/livebook-dev/livebook) — monitors nodes with cleanup on disconnect, and [libcluster](https://github.com/bitwalker/libcluster) — reconciliation loop with pluggable connect/disconnect MFAs.
+
+```elixir
+defmodule MyApp.ClusterMonitor do
+  @moduledoc """
+  Monitors cluster connectivity and reconciles state on node changes.
+  Based on Livebook's NodeManager (cache cleanup on disconnect)
+  and libcluster (reconciliation with desired vs actual membership).
+  """
+  use GenServer
+  require Logger
+
+  def start_link(opts) do
+    GenServer.start_link(__MODULE__, opts, name: __MODULE__)
+  end
+
+  def connected_nodes, do: GenServer.call(__MODULE__, :connected_nodes)
+  def partition_history, do: GenServer.call(__MODULE__, :partition_history)
+
+  @impl true
+  def init(_opts) do
+    :net_kernel.monitor_nodes(true, node_type: :all)
+
+    state = %{
+      nodes: MapSet.new(Node.list()),
+      partitions: [],
+      on_connect: [],     # {module, function, extra_args} callbacks
+      on_disconnect: []
+    }
+
+    Logger.info("ClusterMonitor started, nodes: #{inspect(Node.list())}")
+    {:ok, state}
+  end
+
+  @impl true
+  def handle_info({:nodeup, node, _info}, state) do
+    Logger.info("Node connected: #{node}")
+    new_nodes = MapSet.put(state.nodes, node)
+
+    # Run connect callbacks (sync state, rebuild caches)
+    Enum.each(state.on_connect, fn {m, f, a} -> apply(m, f, [node | a]) end)
+
+    {:noreply, %{state | nodes: new_nodes}}
+  end
+
+  @impl true
+  def handle_info({:nodedown, node, info}, state) do
+    reason = Keyword.get(info, :nodedown_reason, :unknown)
+    Logger.warning("Node disconnected: #{node}, reason: #{inspect(reason)}")
+
+    new_nodes = MapSet.delete(state.nodes, node)
+    entry = %{node: node, reason: reason, at: DateTime.utc_now()}
+    partitions = [entry | Enum.take(state.partitions, 99)]
+
+    # Run disconnect callbacks (clean caches, failover)
+    Enum.each(state.on_disconnect, fn {m, f, a} -> apply(m, f, [node, reason | a]) end)
+
+    {:noreply, %{state | nodes: new_nodes, partitions: partitions}}
+  end
+
+  @impl true
+  def handle_call(:connected_nodes, _from, state) do
+    {:reply, MapSet.to_list(state.nodes), state}
+  end
+
+  def handle_call(:partition_history, _from, state) do
+    {:reply, state.partitions, state}
+  end
+end
+```
+
+### Distributed Task Execution
+
+> Based on: [Livebook ErlDist](https://github.com/livebook-dev/livebook) — atomic check-and-start with `Process.monitor` + raw `send` to avoid TOCTOU races, and module injection via `:rpc.call`.
+
+```elixir
+defmodule MyApp.DistributedExecutor do
+  @moduledoc """
+  Execute tasks on remote nodes. Uses MFA (not lambdas) for cross-node safety.
+  Based on Livebook's ErlDist which uses monitor+send for atomic remote operations.
+  """
+
+  @doc "Execute MFA on a specific node with timeout"
+  def execute_on(node, module, function, args, timeout \\ 30_000) do
+    case :rpc.call(node, module, function, args, timeout) do
+      {:badrpc, reason} -> {:error, {:rpc_failed, node, reason}}
+      result -> {:ok, result}
+    end
+  end
+
+  @doc "Execute on all connected nodes, collect results"
+  def execute_on_all(module, function, args, opts \\ []) do
+    timeout = Keyword.get(opts, :timeout, 30_000)
+    nodes = [Node.self() | Node.list()]
+
+    nodes
+    |> Task.async_stream(
+      fn node -> {node, execute_on(node, module, function, args, timeout)} end,
+      timeout: timeout + 5_000,
+      on_timeout: :kill_task
+    )
+    |> Enum.reduce(%{successes: [], failures: []}, fn
+      {:ok, {node, {:ok, result}}}, acc ->
+        %{acc | successes: [{node, result} | acc.successes]}
+      {:ok, {node, {:error, reason}}}, acc ->
+        %{acc | failures: [{node, reason} | acc.failures]}
+      {:exit, reason}, acc ->
+        %{acc | failures: [{:unknown, {:exit, reason}} | acc.failures]}
+    end)
+  end
+
+  @doc "Execute on first available node (load balancing)"
+  def execute_on_any(module, function, args) do
+    nodes = Enum.shuffle([Node.self() | Node.list()])
+
+    Enum.find_value(nodes, {:error, :all_nodes_failed}, fn node ->
+      case execute_on(node, module, function, args) do
+        {:ok, result} -> {:ok, {node, result}}
+        {:error, _} -> nil
+      end
+    end)
+  end
+
+  @doc """
+  Atomic remote process start — avoids TOCTOU race between whereis and call.
+  Based on Livebook's pattern: monitor first, then send, handle :DOWN.
+  """
+  def start_remote_process(node, module, args) do
+    case :rpc.call(node, GenServer, :start_link, [module, args]) do
+      {:badrpc, reason} ->
+        {:error, {:rpc_failed, node, reason}}
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+        {:ok, pid, ref}
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+end
+```
