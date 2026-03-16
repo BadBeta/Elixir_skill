@@ -41,7 +41,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 3. **NEVER write imperative loops.** Elixir has no for/while loops with mutable state. Use `Enum.map/2`, `Enum.filter/2`, `Enum.reduce/3`, or `for` comprehensions.
 4. **ALWAYS design functions for pipe-ability.** The subject (primary data) goes as the first argument. Return the transformed data.
 5. **PREFER pattern matching in function heads** over `case` in the body when dispatching on argument shape or type.
-6. **PREFER Enum functions over manual recursion** for collection processing. Use recursion only for early termination, infinite streams, or complex multi-accumulator state.
+6. **PREFER Enum functions over manual recursion** for collection processing. Use recursion only for early termination, tree/graph traversal, or complex multi-accumulator state. Use `Stream` for infinite/lazy sequences.
 7. **NEVER reassign to accumulate.** Rebinding a variable inside `Enum.each/2` does NOT mutate the outer variable. Use `Enum.reduce/3` or `Enum.map/2` to collect results.
 8. **USE `with` for chaining** 2+ operations that return `{:ok, _}/{:error, _}`. Don't nest `case` statements.
 9. **USE guard clauses** to constrain function heads rather than validating inside the body with if/else.
@@ -1375,7 +1375,7 @@ orders
 
 ## Recursion Patterns
 
-**Rule: Prefer Enum functions.** Use recursion only when you need early termination with complex conditions, multiple accumulators, tree/graph traversal, or infinite/generative sequences.
+**Rule: Prefer Enum functions.** Use recursion only when you need early termination with complex conditions, multiple accumulators, or tree/graph traversal. Use `Stream` for infinite/generative sequences.
 
 ```elixir
 # Accumulator pattern (tail-recursive)
