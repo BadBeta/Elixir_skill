@@ -1,5 +1,6 @@
 ---
 name: elixir
+version: "0.11"
 description: Elixir functional programming, OTP, and Ecto — pattern matching, pipelines, Enum/Stream, with-chains, ok/error tuples, multi-clause functions, GenServer, gen_statem, supervision, ETS, Ecto schemas/changesets/queries/migrations, configuration, telemetry, HTTP clients, and type system. ALWAYS use this skill when writing Elixir to avoid imperative anti-patterns. ALWAYS use when designing OTP supervision trees, state machines, or distributed systems. ALWAYS consult the Architecture and OTP sections when planning new Elixir projects, refactoring existing ones, or making structural decisions.
 ---
 
@@ -1411,7 +1412,7 @@ Enum.frequencies(enum)           # %{elem => count}
 Enum.frequencies_by(enum, fun)   # %{key => count}
 Enum.map_reduce(enum, acc, fun)  # {mapped_list, final_acc}
 Enum.uniq_by(enum, fun)          # Deduplicate by key function
-Enum.each(enum, fun)             # Side effects only — returns :ok
+Enum.each(enum, fun)             # Invoke fun on each element (returns :ok)
 Enum.zip_with([a, b], fn [x, y] -> {x, y} end)  # Zip with transform
 Enum.min_max_by(enum, fun)       # {min, max} by key
 Enum.slide(enum, index, to)      # Move element (1.13+)
@@ -1657,7 +1658,6 @@ with {:ok, resp} <- HTTPClient.get(url),
   {:ok, body}
 end
 # Returns the first {:error, _} from the chain automatically
-```
 
 # Multi-clause functions — match directly on ok/error
 def handle_result({:ok, user}), do: send_welcome(user)
