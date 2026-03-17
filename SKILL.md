@@ -579,10 +579,12 @@ defmodule MyApp.Catalog do
   alias MyApp.Catalog.{Product, PriceCalculator}
 
   # --- Public API (the only functions other modules should call) ---
-  def get_product!(id), do: Product.fetch!(id)
-  def create_product(attrs), do: Product.create(attrs)
+  defdelegate get_product!(id), to: Product, as: :fetch!
+  defdelegate create_product(attrs), to: Product, as: :create
   def calculate_price(product, qty), do: PriceCalculator.total(product, qty)
 end
+# defdelegate compiles to a direct call — zero overhead, keeps context as clean facade
+# Use regular def when you need to wrap, transform args, or add logic
 ```
 
 **Internal modules are private** — never call them from outside the context:
@@ -609,10 +611,31 @@ defmodule MyApp.Ordering do
 end
 ```
 
-**When to split vs merge contexts:**
-- **Split:** different business domain, different team, distinct data lifecycle
-- **Merge:** shared aggregate root, tightly coupled operations, constant cross-calls
-- **When unsure:** keep separate — merging later is easier than splitting
+**When to split vs merge:** Split when different domain/team/data lifecycle. Merge when shared aggregate root or constant cross-calls. When unsure, keep separate — merging is easier than splitting.
+
+**Behaviours as context contracts** — swap implementations without changing callers:
+
+```elixir
+defmodule MyApp.PaymentProvider do
+  @callback charge(Decimal.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  @callback refund(String.t()) :: :ok | {:error, term()}
+end
+
+defmodule MyApp.Payments.Stripe do
+  @behaviour MyApp.PaymentProvider
+  @impl true
+  def charge(amount, token), do: # Stripe API...
+  @impl true
+  def refund(charge_id), do: # Stripe refund...
+end
+
+# Context facade — callers use MyApp.Payments, never know which provider
+defmodule MyApp.Payments do
+  @provider Application.compile_env(:my_app, :payment_provider, MyApp.Payments.Stripe)
+  defdelegate charge(amount, token), to: @provider
+  defdelegate refund(charge_id), to: @provider
+end
+```
 
 **Internal organization** — the context module is the boundary, internals are free-form:
 
@@ -1576,6 +1599,13 @@ end, fn _acc -> :ok end)
 
 **Rule: Prefer Enum functions.** Use recursion only when you need early termination with complex conditions, multiple accumulators, or tree/graph traversal. Use `Stream` for infinite/generative sequences.
 
+**Tail call optimization (TCO):** When a function's last expression is a call to itself, the BEAM reuses the stack frame — constant memory, no stack overflow regardless of depth.
+
+- Operations after the call break TCO — `[h | func(t)]` is NOT tail-recursive (cons happens after return). Accumulate and reverse instead.
+- `try/rescue/catch` blocks prevent TCO — the BEAM keeps the frame for exception handling.
+- Stack traces lose intermediate frames — reused frames mean you won't see every recursion step in crash traces.
+- `case`, `if`, `with` around the call are fine — TCO applies as long as the recursive call is last in whichever branch executes.
+
 ```elixir
 # Accumulator pattern (tail-recursive)
 def sum(list), do: sum(list, 0)
@@ -1807,50 +1837,7 @@ from(p in Post,
 |> Repo.all()
 ```
 
-### Migration Essentials
-
-```elixir
-defmodule MyApp.Repo.Migrations.CreatePosts do
-  use Ecto.Migration
-
-  def change do
-    create table(:posts) do
-      add :title, :string, null: false
-      add :body, :text
-      add :status, :string, default: "draft"
-      add :author_id, references(:users, on_delete: :delete_all), null: false
-      timestamps(type: :utc_datetime_usec)
-    end
-
-    create index(:posts, [:author_id])
-    create unique_index(:posts, [:slug])
-  end
-end
-
-# Concurrent index (no table lock — for production tables)
-@disable_ddl_transaction true
-@disable_migration_lock true
-def change do
-  create index(:posts, [:published_at], concurrently: true)
-end
-```
-
-### Ecto.Multi
-
-```elixir
-Multi.new()
-|> Multi.insert(:user, User.registration_changeset(%User{}, params))
-|> Multi.insert(:profile, fn %{user: user} ->
-  Profile.changeset(%Profile{}, %{user_id: user.id})
-end)
-|> Multi.run(:welcome, fn _repo, %{user: user} ->
-  case Mailer.send_welcome(user) do
-    :ok -> {:ok, :sent}
-    error -> {:error, error}
-  end
-end)
-|> Repo.transact()
-```
+### Migration & Multi — see [ecto-reference.md](ecto-reference.md) and [ecto-examples.md](ecto-examples.md)
 
 ### Common Mistakes (BAD/GOOD)
 
