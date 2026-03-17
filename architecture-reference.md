@@ -282,6 +282,18 @@ mix phx.gen.live Catalog Product products title:string price:decimal
 
 mix phx.gen.html Catalog Product products title:string price:decimal
 # Creates: context + controller + templates + routes
+
+mix phx.gen.json Accounts User users name:string email:string
+mix phx.gen.auth Accounts User users
+```
+
+### Generator Field Types
+
+```bash
+name:string  age:integer  price:decimal  active:boolean  body:text
+published_at:datetime  birth_date:date  inserted_at:utc_datetime
+user_id:references:users  tags:array:string  metadata:map
+email:string:unique  # With modifiers
 ```
 
 ### Context Boundary Rules
@@ -978,7 +990,7 @@ Design components for reuse across projects by following these patterns:
 
 ## Production Patterns
 
-> Production Phoenix patterns (changelog.com), Edge/IoT patterns (ExNVR), and Job Processing patterns (Oban) are in `production.md`. Full implementations in `examples.md`.
+> Production Phoenix patterns (changelog.com), Edge/IoT patterns (ExNVR), and Job Processing patterns (Oban) are in [production.md](production.md).
 >
 > **OTP supporting files:** Quick-reference tables in [otp-reference.md](otp-reference.md). Complete working examples (rate limiter, connection state machine, worker pool, cache, circuit breaker, pub/sub, task pipeline, telemetry, distributed counter, graceful shutdown) in [otp-examples.md](otp-examples.md). GenStage, Flow, Broadway, hot code upgrades, and production debugging in [otp-advanced.md](otp-advanced.md).
 

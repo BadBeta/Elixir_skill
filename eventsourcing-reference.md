@@ -2,6 +2,85 @@
 
 Quick-lookup tables for Commanded library, event store configuration, router DSL, middleware, projections, process managers, serialization, and mix tasks. Patterns sourced from Commanded library test suite and documentation.
 
+## Rules for Writing Event-Sourced Elixir (LLM)
+
+1. **ALWAYS name events in past tense** — events record what happened (`AccountOpened`, `FundsDeposited`), never imperative (`OpenAccount` is a command, not an event).
+2. **NEVER mutate or modify stored events** — events are immutable facts. Schema changes require new event types (V2, V3) with upcasters for backward compatibility.
+3. **ALWAYS include all data needed by projections on the event** — projectors must never look up external data. Events are the single source of truth.
+4. **NEVER perform side effects in aggregates or process managers** — no HTTP calls, no database reads, no external API calls. Side effects belong in event handlers (gateways/notifiers).
+5. **ALWAYS test aggregates as pure functions** — test `execute/2` input/output (command → event or error), not internal state. Never assert `state.balance == 100` directly.
+6. **NEVER let process managers read from projections** — process manager state must be derived entirely from events via `apply/2`.
+7. **ALWAYS manage one flow per process manager instance** — each instance handles a single business process.
+8. **ALWAYS return unchanged state from failure event apply/2** — failure events record that something failed but must not change aggregate state.
+9. **ALWAYS design projections for specific query patterns** — create multiple projections from the same events for different read needs.
+10. **NEVER share projection tables between projectors** — each projector owns its projections exclusively.
+
+## When to Use Event Sourcing
+
+**Use when:**
+- Complex domains with long-lived processes (insurance claims, order fulfillment, loan origination)
+- Perfect audit trails are a business requirement (finance, healthcare, compliance)
+- Undo/redo/replay capabilities needed
+- Event-driven microservice integration
+- Collaborative multi-user systems with concurrent state changes
+
+**Do NOT use when:**
+- Simple CRUD applications (blogs, to-do lists)
+- Static reference/lookup data
+- Read-heavy analytical systems (OLAP)
+- Strong consistency reads required with zero latency
+- Small teams without event sourcing experience
+
+**Hybrid approach:** Use event sourcing only for critical bounded contexts (financial transactions, order processing) while keeping simple domains as traditional CRUD with Ecto.
+
+## Core Architecture
+
+```
+Client → Command → Router → Aggregate → Event Store (append-only)
+                                              ↓
+                              ┌────────────────┼────────────────┐
+                              ↓                ↓                ↓
+                        Process Manager   Projector        Event Handler
+                        (emits commands)  (read model)     (side effects)
+```
+
+**Aggregate**: Receives commands, validates business rules, emits events. Pure functions — no side effects.
+**Projector**: Subscribes to events, builds read-optimized projections (Ecto, ETS, Redis).
+**Process Manager (Saga)**: Orchestrates multi-aggregate workflows. Has lifecycle: start → continue → stop.
+**Event Handler**: Performs side effects (email, webhooks, external APIs). Only gateway for external work.
+
+### Common Mistakes (BAD/GOOD)
+
+```elixir
+# BAD: Imperative event naming
+%PlaceOrder{order_id: "123"}         # This is a command name
+# GOOD: Past tense
+%OrderPlaced{order_id: "123"}
+
+# BAD: Side effects in aggregate
+def execute(%__MODULE__{}, %WithdrawFunds{} = cmd) do
+  HTTPClient.notify_bank(cmd)  # NEVER in aggregate
+  %FundsWithdrawn{...}
+end
+# GOOD: Event handler does side effects
+defmodule BankNotifier do
+  use Commanded.Event.Handler, application: MyApp.CommandedApp, name: __MODULE__
+  def handle(%FundsWithdrawn{} = event, _metadata), do: HTTPClient.notify(event)
+end
+
+# BAD: Missing data on events
+%FundsWithdrawn{account_id: "123", amount: 50}
+# GOOD: All derived data included
+%FundsWithdrawn{account_id: "123", amount: 50, new_balance: 150}
+
+# BAD: Testing internal state
+state = Account.apply(%Account{}, %FundsDeposited{amount: 100})
+assert state.balance == 100
+# GOOD: Test execute/2 output
+state = %Account{balance: 100, status: :open}
+assert %FundsWithdrawn{new_balance: 70} = Account.execute(state, %WithdrawFunds{amount: 30})
+```
+
 ## Dependencies
 
 ```elixir

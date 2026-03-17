@@ -368,6 +368,29 @@ name |> String.upcase()
 # GOOD:
 String.upcase(name)
 
+# Design functions data-first so they compose in pipelines
+defmodule StringHelpers do
+  def normalize(string) do
+    string |> String.trim() |> String.downcase() |> String.replace(~r/\s+/, " ")
+  end
+  def truncate(string, max) when byte_size(string) <= max, do: string
+  def truncate(string, max), do: String.slice(string, 0, max - 3) <> "..."
+end
+
+input |> StringHelpers.normalize() |> StringHelpers.truncate(100)
+
+# Break long pipelines into named private functions
+def process_orders(orders) do
+  orders
+  |> filter_valid()
+  |> calculate_totals()
+  |> apply_discounts()
+  |> generate_invoices()
+end
+
+defp filter_valid(orders), do: orders |> Enum.filter(&valid_order?/1) |> Enum.reject(&cancelled?/1)
+defp calculate_totals(orders), do: Enum.map(orders, &%{&1 | total: calculate_order_total(&1)})
+
 # Conditional steps — use maybe_ helpers to keep pipeline flat
 data
 |> transform()
@@ -381,6 +404,40 @@ defp maybe_validate(data, _), do: data
 data
 |> transform()
 |> then(fn d -> if opts[:validate], do: validate(d), else: d end)
+
+# tap/1 — inspect without breaking the pipeline (returns input unchanged)
+order
+|> calculate_total()
+|> tap(&Logger.debug("Total: #{&1}"))
+|> apply_tax()
+
+# Error pipeline with with — short-circuit on first error
+with {:ok, user} <- fetch_user(id),
+     {:ok, account} <- fetch_account(user),
+     {:ok, balance} <- check_balance(account, amount) do
+  {:ok, transfer(balance, amount)}
+else
+  {:error, :not_found} -> {:error, "User not found"}
+  {:error, :insufficient} -> {:error, "Insufficient funds"}
+end
+
+# ok/error pipeline — chain with pattern-matching helpers
+defp authorize(user, action) do
+  user
+  |> check_role(action)
+  |> check_permissions(action)
+  |> check_rate_limit()
+end
+
+defp check_role(%{role: :admin} = user, _action), do: {:ok, user}
+defp check_role(%{role: :user} = user, :read), do: {:ok, user}
+defp check_role(_, action), do: {:error, {:unauthorized, action}}
+
+defp check_permissions({:ok, user}, action), do: Permissions.verify(user, action)
+defp check_permissions(error, _action), do: error
+
+defp check_rate_limit({:ok, user}), do: RateLimiter.check(user)
+defp check_rate_limit(error), do: error
 ```
 
 ### Multi-Clause Anonymous Functions
@@ -511,6 +568,61 @@ defmodule MyApp.Application do
 end
 ```
 
+### Context Modules — Domain Boundaries
+
+Group related functionality into context modules — each is a public API boundary (DDD bounded context). This applies to any Elixir application, not just Phoenix.
+
+```elixir
+defmodule MyApp.Catalog do
+  @moduledoc "Product catalog — public API for all product operations."
+  alias MyApp.Catalog.{Product, PriceCalculator}
+
+  # --- Public API (the only functions other modules should call) ---
+  def get_product!(id), do: Product.fetch!(id)
+  def create_product(attrs), do: Product.create(attrs)
+  def calculate_price(product, qty), do: PriceCalculator.total(product, qty)
+end
+```
+
+**Internal modules are private** — never call them from outside the context:
+
+```elixir
+defmodule MyApp.Catalog.PriceCalculator do
+  @moduledoc false  # Internal to Catalog context
+  def total(product, qty), do: Decimal.mult(product.price, qty)
+end
+```
+
+**Cross-context communication** — always go through public API:
+
+```elixir
+defmodule MyApp.Ordering do
+  alias MyApp.Catalog  # Depend on context, not internals
+
+  def place_order(product_id, qty) do
+    product = Catalog.get_product!(product_id)            # GOOD
+    # MyApp.Catalog.PriceCalculator.total(product, qty)   # BAD — bypasses boundary
+    total = Catalog.calculate_price(product, qty)
+    do_place_order(product, qty, total)
+  end
+end
+```
+
+**When to split vs merge contexts:**
+- **Split:** different business domain, different team, distinct data lifecycle
+- **Merge:** shared aggregate root, tightly coupled operations, constant cross-calls
+- **When unsure:** keep separate — merging later is easier than splitting
+
+**Internal organization** — the context module is the boundary, internals are free-form:
+
+```
+lib/my_app/catalog/
+├── product.ex            # Data + persistence (internal)
+├── category.ex           # Data + persistence (internal)
+├── price_calculator.ex   # Pure business logic (internal)
+└── import_worker.ex      # Background processing (internal)
+```
+
 > **Deep dive — ALWAYS read for architecture planning and refactoring:**
 > [architecture-reference.md](architecture-reference.md) — project layouts (single app, umbrella, poncho
 > with decision guide), Phoenix contexts (public API design, cross-context communication), layered architecture
@@ -609,6 +721,40 @@ end
 | `:rest_for_one` | Failed + all started after it | Later children depend on earlier ones |
 | `:one_for_all` | All children | Children are tightly coupled |
 
+```elixir
+# :one_for_one — independent workers (web endpoints, job processors)
+children = [
+  MyApp.Repo,
+  MyApp.Cache,
+  {MyApp.Worker, name: :worker_a},
+  {MyApp.Worker, name: :worker_b}
+]
+Supervisor.start_link(children, strategy: :one_for_one)
+
+# :rest_for_one — ordered dependencies (Registry before DynamicSupervisor)
+children = [
+  {Registry, keys: :unique, name: MyApp.Registry},       # 1st: must exist
+  {DynamicSupervisor, name: MyApp.WorkerSup},             # 2nd: uses Registry
+  {MyApp.WorkerStarter, registry: MyApp.Registry}         # 3rd: uses both
+]
+Supervisor.start_link(children, strategy: :rest_for_one)
+
+# :one_for_all — tightly coupled (producer + consumer, writer + reader)
+children = [
+  {MyApp.EventBus, name: :event_bus},
+  {MyApp.EventLogger, bus: :event_bus},
+  {MyApp.EventNotifier, bus: :event_bus}
+]
+Supervisor.start_link(children, strategy: :one_for_all)
+
+# Restart intensity — max 3 restarts in 5 seconds before supervisor gives up
+Supervisor.start_link(children,
+  strategy: :one_for_one,
+  max_restarts: 3,
+  max_seconds: 5
+)
+```
+
 ### DynamicSupervisor + Registry
 
 ```elixir
@@ -677,10 +823,25 @@ end
 ```elixir
 :ets.new(:cache, [:named_table, :public, read_concurrency: true])
 :ets.insert(:cache, {key, value})
-:ets.lookup(:cache, key)
+:ets.lookup(:cache, key)  # [{key, value}] or []
+
+# Atomic counters — no race conditions
+:ets.new(:stats, [:named_table, :public, write_concurrency: true])
+:ets.update_counter(:stats, :requests, {2, 1}, {:requests, 0})  # increment by 1, default 0
+
+# Match specs — server-side filtering (faster than lookup + Enum.filter)
+# Find all users with age > 30: table has {name, age, email}
+:ets.select(:users, [{{:"$1", :"$2", :"$3"}, [{:>, :"$2", 30}], [{{:"$1", :"$3"}}]}])
+# Returns [{name, email}] for matching rows
+
+# Simpler: match_object with partial tuple
+:ets.match_object(:cache, {:_, :active, :_})  # all tuples with :active in position 2
+
+# Delete matching entries
+:ets.select_delete(:cache, [{{:_, :"$1", :_}, [{:<, :"$1", expired_at}], [true]}])
 ```
 
-Use ETS instead of GenServer for read-heavy workloads to avoid bottlenecks.
+Use ETS instead of GenServer for read-heavy workloads to avoid bottlenecks. Use `write_concurrency: true` when multiple processes write to different keys.
 
 ### Graceful Shutdown
 
@@ -1047,25 +1208,6 @@ Returns `{:ok, user}` if found, `{:error, :not_found}` otherwise.
 def get_user(id), do: ...
 ```
 
-### Doctest Syntax
-
-```elixir
-## Examples                     # Must be preceded by ## Examples header
-
-    iex> MyMod.add(1, 2)       # 4-space indent, iex> prefix
-    3                           # Expected output on next line
-
-    iex> result = MyMod.fetch("key")
-    ...> |> elem(1)            # Multi-line: ...> for continuation
-    "value"
-
-    iex> MyMod.boom()          # Exception doctest
-    ** (RuntimeError) boom!
-
-    iex> MyMod.make_ref()      # Opaque values — match struct name
-    #Reference<0.1.2.3>
-```
-
 ### Common @spec Patterns
 
 ```elixir
@@ -1101,19 +1243,59 @@ def get_user(id), do: ...
 ```elixir
 defmodule User do
   @enforce_keys [:email]
-  defstruct [:name, :email, age: 18]
-  @type t :: %__MODULE__{name: String.t() | nil, email: String.t(), age: non_neg_integer()}
+  defstruct [:name, :email, age: 18, role: :user]
+  @type t :: %__MODULE__{name: String.t() | nil, email: String.t(), age: non_neg_integer(), role: atom()}
+
+  # Constructor — validate and set defaults in one place
+  def new(attrs) when is_map(attrs) do
+    struct!(__MODULE__, attrs)   # Raises on unknown keys
+  end
+
+  # Named update functions — express intent, hide field names
+  def promote(%__MODULE__{} = user), do: %{user | role: :admin}
+  def rename(%__MODULE__{} = user, name), do: %{user | name: name}
 end
 
 # Update syntax — raises on unknown keys (compile-time safety)
 %{user | name: "New Name"}
 
+# Pattern match on struct type — dispatch or validate
+def greet(%User{name: name}), do: "Hello, #{name}"
+def greet(%Admin{name: name}), do: "Welcome back, #{name}"
+
 # Pipeline of struct transforms
 order
-|> validate_inventory()
-|> apply_discounts()
-|> calculate_tax()
-|> set_status(:confirmed)
+|> Order.validate_inventory()
+|> Order.apply_discounts()
+|> Order.calculate_tax()
+|> Order.confirm()
+
+# Struct as behaviour contract — all fields documented in one place
+# Functions that take/return the struct live in the same module
+
+# Nested structs — compose domain models
+defmodule Customer do
+  @enforce_keys [:name, :email]
+  defstruct [:name, :email, address: %Address{}]
+
+  # Deep update with put_in (structs support Access via Map)
+  def update_city(%__MODULE__{} = c, city), do: put_in(c.address.city, city)
+end
+
+# Deriving protocols — declare at struct definition
+defmodule Event do
+  @derive {Jason.Encoder, only: [:type, :data, :timestamp]}
+  @derive {Inspect, only: [:type, :timestamp]}  # Hide sensitive data from logs
+  defstruct [:type, :data, :timestamp, :internal_id]
+end
+
+# Constructor with ok/error — validate before creating
+def new(attrs) do
+  case Map.fetch(attrs, :email) do
+    {:ok, email} when is_binary(email) -> {:ok, struct!(__MODULE__, attrs)}
+    _ -> {:error, :email_required}
+  end
+end
 ```
 
 ### Lists — Linked Lists
@@ -1366,6 +1548,22 @@ orders
 |> Stream.map(&calculate_total/1)
 |> Stream.reject(&(&1.total == 0))
 |> Enum.sum()                     # Enum call triggers the lazy pipeline
+
+# Stream.chunk_while — variable-size chunks with custom logic
+# Group log lines into multi-line entries (entry starts with timestamp)
+File.stream!("app.log")
+|> Stream.chunk_while([], fn
+  line, [] -> {:cont, [line]}
+  <<d, _::binary>> = line, acc when d in ?0..?9 -> {:cont, Enum.reverse(acc), [line]}
+  line, acc -> {:cont, [line | acc]}
+end, fn acc -> {:cont, Enum.reverse(acc), []} end)
+
+# Stream.transform — stateful stream transformation
+# Rate-limit: emit at most 10 items per second
+Stream.transform(items, fn -> :ok end, fn item, acc ->
+  Process.sleep(100)
+  {[item], acc}
+end, fn _acc -> :ok end)
 ```
 
 > **Deep dive:** [language-patterns.md](language-patterns.md) — Enumerable protocol implementation (reduce/3,
@@ -1417,13 +1615,84 @@ end
 
 ### ok/error Tuples
 
+The standard Elixir convention for results. Use atoms for error types, structs/maps for rich errors.
+
 ```elixir
-case fetch_user(id) do
+# Return conventions — be consistent within a context
+{:ok, value}                        # Success with data
+:ok                                 # Success, no data (side-effect confirmation)
+{:error, :not_found}                # Typed failure (atom)
+{:error, %Changeset{}}              # Rich failure (struct with details)
+{:error, {reason, details}}         # Compound failure
+
+# Pattern match with case
+case Repo.fetch(User, id) do
   {:ok, user} -> process(user)
   {:error, :not_found} -> create_default(id)
   {:error, reason} -> log_and_fail(reason)
 end
+
+# Bang (!) variants — raise on error, used when failure is unexpected
+user = Repo.get!(User, id)         # Raises Ecto.NoResultsError
+file = File.read!(path)            # Raises File.Error
+
+# Writing bang/non-bang pairs
+def fetch_config(key) do
+  case lookup(key) do
+    nil -> {:error, :not_found}
+    val -> {:ok, val}
+  end
+end
+
+def fetch_config!(key) do
+  case fetch_config(key) do
+    {:ok, val} -> val
+    {:error, reason} -> raise "Config #{key} failed: #{reason}"
+  end
+end
+
+# Wrapping external results
+with {:ok, resp} <- HTTPClient.get(url),
+     {:ok, body} <- Jason.decode(resp.body) do
+  {:ok, body}
+end
+# Returns the first {:error, _} from the chain automatically
 ```
+
+# Multi-clause functions — match directly on ok/error
+def handle_result({:ok, user}), do: send_welcome(user)
+def handle_result({:error, :not_found}), do: redirect_to_signup()
+def handle_result({:error, _reason}), do: show_generic_error()
+
+# Tagged tuples in with — label each step for targeted error handling
+with {:user, {:ok, user}} <- {:user, fetch_user(id)},
+     {:auth, :ok} <- {:auth, authorize(user, action)},
+     {:save, {:ok, result}} <- {:save, save(user)} do
+  {:ok, result}
+else
+  {:user, {:error, _}} -> {:error, :user_not_found}
+  {:auth, {:error, _}} -> {:error, :unauthorized}
+  {:save, {:error, changeset}} -> {:error, changeset}
+end
+
+# Filtering ok results from a list
+results = Enum.map(items, &process/1)
+successes = for {:ok, val} <- results, do: val
+failures = for {:error, reason} <- results, do: reason
+
+# ok/error in GenServer — pass through the tuple
+def handle_call(:get, _from, state) do
+  case compute(state) do
+    {:ok, result} -> {:reply, {:ok, result}, state}
+    {:error, _} = err -> {:reply, err, state}  # Capture and forward
+  end
+end
+```
+
+**When to use which:**
+- Non-bang (`fetch/1`) — caller decides how to handle failure
+- Bang (`fetch!/1`) — failure is a bug, crash early (scripts, seeds, known-good paths)
+- `:ok` atom — fire-and-forget side effects (logging, cache writes, sending messages)
 
 ### Let It Crash
 
@@ -1690,10 +1959,6 @@ Task.async(fn -> work() end) |> Task.await()  # Async with result
 :timer.apply_after(1_000, Module, :fun, []) # Call function after 1s
 {time_us, result} = :timer.tc(fn -> work() end)  # Measure execution
 
-# :crypto — hashing and random bytes
-:crypto.hash(:sha256, "data") |> Base.encode16(case: :lower)
-:crypto.strong_rand_bytes(32) |> Base.url_encode64()
-
 # :queue — efficient FIFO (O(1) amortized in/out)
 q = :queue.new() |> :queue.in(:a) |> :queue.in(:b)
 {{:value, :a}, q} = :queue.out(q)
@@ -1716,14 +1981,6 @@ q = :queue.new() |> :queue.in(:a) |> :queue.in(:b)
 # Built-in JSON module (Elixir 1.18+)
 JSON.encode!(%{name: "test", age: 30})
 JSON.decode!(~s({"name":"test"}))
-
-# Jason (pre-1.18 or advanced features)
-Jason.encode!(%{name: "test"})
-Jason.decode!(json_string)
-
-# @derive for struct encoding
-@derive {Jason.Encoder, only: [:id, :name]}
-defstruct [:id, :name, :secret]
 ```
 
 ## Anti-Patterns to Avoid
@@ -1863,58 +2120,9 @@ items |> Enum.map(&["Item: ", &1, "\n"]) |> IO.iodata_to_binary()
 
 ## State Machines
 
-> For comprehensive state machine guidance, use the `state-machine` skill.
+> For comprehensive guidance, use the `state-machine` skill.
 
-### When to Use State Machines
-
-State machines are ideal when your domain logic involves:
-
-**Lifecycle Management**
-- Orders: pending → confirmed → shipped → delivered
-- Subscriptions: trial → active → suspended → cancelled
-- Documents: draft → review → approved → published
-
-**Protocol Implementation**
-- TCP connections (connecting, connected, closing)
-- Authentication flows (unauthenticated, authenticating, authenticated)
-- Two-phase commit (preparing, committing, aborting)
-
-**Resource Management**
-- Circuit breakers (closed, open, half-open)
-- Connection pools (available, in-use, draining)
-- Rate limiters (allowing, throttled)
-
-**Hardware/Device Control**
-- Device states (idle, active, error, recovery)
-- Motor control (stopped, accelerating, running, braking)
-- Sensor processing (calibrating, reading, faulted)
-
-### State Machine vs Conditionals
-
-```elixir
-# BAD: State logic scattered across conditionals
-def process_order(order, action) do
-  cond do
-    order.state == :pending and action == :confirm -> confirm(order)
-    order.state == :pending and action == :cancel -> cancel(order)
-    order.state == :confirmed and action == :ship -> ship(order)
-    # More conditionals as states grow...
-    true -> {:error, :invalid_action}
-  end
-end
-
-# GOOD: Explicit state machine
-# Makes valid transitions clear, prevents invalid ones
-state_machine do
-  transitions do
-    transition :confirm, from: :pending, to: :confirmed
-    transition :cancel, from: [:pending, :confirmed], to: :cancelled
-    transition :ship, from: :confirmed, to: :shipped
-  end
-end
-```
-
-### State Machine Options in Elixir
+**Use when:** lifecycle management (orders, subscriptions, documents), protocol implementation (TCP, auth flows, 2PC), resource management (circuit breakers, connection pools), hardware/device control (motors, sensors). **Skip when:** simple CRUD, boolean flags, no meaningful transitions.
 
 | Approach | Best For | Trade-off |
 |----------|----------|-----------|
@@ -1923,152 +2131,45 @@ end
 | **fsmx / Machinery** | Ecto schemas with state field | Lightweight, database-backed |
 | **Pure pattern matching** | Simple state transitions | Minimal deps, manual validation |
 
-### When NOT to Use State Machines
-
-- Simple CRUD without lifecycle logic
-- One-off status flags (`active: true/false`)
-- When states don't have meaningful transitions
-- Overengineering simple boolean checks
-
-### Quick Example with gen_statem
-
 ```elixir
+# BAD: State logic scattered across conditionals
+def process(order, action) do
+  cond do
+    order.state == :pending and action == :confirm -> confirm(order)
+    order.state == :confirmed and action == :ship -> ship(order)
+    true -> {:error, :invalid_action}
+  end
+end
+
+# GOOD: Pure function state machine (no process needed)
+defmodule Order do
+  defstruct state: :pending, id: nil
+  def transition(%{state: :pending} = o, :confirm), do: {:ok, %{o | state: :confirmed}}
+  def transition(%{state: :pending} = o, :cancel),  do: {:ok, %{o | state: :cancelled}}
+  def transition(%{state: :confirmed} = o, :ship),  do: {:ok, %{o | state: :shipped}}
+  def transition(_, _), do: {:error, :invalid_transition}
+end
+
+# GOOD: GenStateMachine (when you need process, timeouts, concurrent access)
 defmodule OrderFSM do
   use GenStateMachine, callback_mode: :state_functions
-
-  def start_link(order_id), do: GenStateMachine.start_link(__MODULE__, order_id)
+  def start_link(id), do: GenStateMachine.start_link(__MODULE__, id)
   def confirm(pid), do: GenStateMachine.call(pid, :confirm)
 
   @impl true
-  def init(order_id), do: {:ok, :pending, %{order_id: order_id}}
-
-  def pending({:call, from}, :confirm, data) do
-    {:next_state, :confirmed, data, [{:reply, from, :ok}]}
-  end
-
-  def pending({:call, from}, :cancel, data) do
-    {:next_state, :cancelled, data, [{:reply, from, :ok}]}
-  end
+  def init(id), do: {:ok, :pending, %{id: id}}
+  def pending({:call, from}, :confirm, data),
+    do: {:next_state, :confirmed, data, [{:reply, from, :ok}]}
+  def pending({:call, from}, :cancel, data),
+    do: {:next_state, :cancelled, data, [{:reply, from, :ok}]}
 end
 ```
 
 ## Event Sourcing & CQRS
 
-> **Event sourcing supporting files:** Commanded API reference, router DSL, middleware, projections, process managers, serialization, mix tasks, and troubleshooting in [eventsourcing-reference.md](eventsourcing-reference.md). Complete working examples (aggregates, commands/events, projectors, process managers, event handlers, integration tests, upcasting, GDPR crypto-shredding) in [eventsourcing-examples.md](eventsourcing-examples.md).
+> **ALWAYS read** [eventsourcing-reference.md](eventsourcing-reference.md) for rules, architecture, BAD/GOOD patterns, Commanded API, router DSL, middleware, projections, process managers, and mix tasks. Complete working examples in [eventsourcing-examples.md](eventsourcing-examples.md).
 
-### Rules for Writing Event-Sourced Elixir (LLM)
-
-1. **ALWAYS name events in past tense** — events record what happened (`AccountOpened`, `FundsDeposited`), never imperative (`OpenAccount` is a command, not an event).
-2. **NEVER mutate or modify stored events** — events are immutable facts. Schema changes require new event types (V2, V3) with upcasters for backward compatibility.
-3. **ALWAYS include all data needed by projections on the event** — projectors must never look up external data. Events are the single source of truth.
-4. **NEVER perform side effects in aggregates or process managers** — no HTTP calls, no database reads, no external API calls. Side effects belong in event handlers (gateways/notifiers).
-5. **ALWAYS test aggregates as pure functions** — test `execute/2` input/output (command → event or error), not internal state. Never assert `state.balance == 100` directly.
-6. **NEVER let process managers read from projections** — process manager state must be derived entirely from events via `apply/2`.
-7. **ALWAYS manage one flow per process manager instance** — each instance handles a single business process.
-8. **ALWAYS return unchanged state from failure event apply/2** — failure events record that something failed but must not change aggregate state.
-9. **ALWAYS design projections for specific query patterns** — create multiple projections from the same events for different read needs.
-10. **NEVER share projection tables between projectors** — each projector owns its projections exclusively.
-
-### When to Use Event Sourcing
-
-**Use when:**
-- Complex domains with long-lived processes (insurance claims, order fulfillment, loan origination)
-- Perfect audit trails are a business requirement (finance, healthcare, compliance)
-- Undo/redo/replay capabilities needed
-- Event-driven microservice integration
-- Collaborative multi-user systems with concurrent state changes
-
-**Do NOT use when:**
-- Simple CRUD applications (blogs, to-do lists)
-- Static reference/lookup data
-- Read-heavy analytical systems (OLAP)
-- Strong consistency reads required with zero latency
-- Small teams without event sourcing experience
-
-**Hybrid approach:** Use event sourcing only for critical bounded contexts (financial transactions, order processing) while keeping simple domains as traditional CRUD with Ecto.
-
-### Core Architecture
-
-```
-Client → Command → Router → Aggregate → Event Store (append-only)
-                                              ↓
-                              ┌────────────────┼────────────────┐
-                              ↓                ↓                ↓
-                        Process Manager   Projector        Event Handler
-                        (emits commands)  (read model)     (side effects)
-```
-
-**Aggregate**: Receives commands, validates business rules, emits events. Pure functions — no side effects.
-**Projector**: Subscribes to events, builds read-optimized projections (Ecto, ETS, Redis).
-**Process Manager (Saga)**: Orchestrates multi-aggregate workflows. Has lifecycle: start → continue → stop.
-**Event Handler**: Performs side effects (email, webhooks, external APIs). Only gateway for external work.
-
-### Commanded Quick Start
-
-```elixir
-# Define aggregate
-defmodule MyApp.Account do
-  defstruct [:account_id, :email, balance: 0, status: nil]
-
-  def execute(%__MODULE__{status: nil}, %OpenAccount{} = cmd) do
-    %AccountOpened{account_id: cmd.account_id, email: cmd.email, initial_balance: 0}
-  end
-
-  def execute(%__MODULE__{status: :open, balance: bal}, %WithdrawFunds{amount: amt})
-      when bal >= amt do
-    %FundsWithdrawn{amount: amt, new_balance: bal - amt}
-  end
-
-  def execute(%__MODULE__{status: :open}, %WithdrawFunds{}), do: {:error, :insufficient_funds}
-
-  def apply(%__MODULE__{} = acct, %AccountOpened{} = e) do
-    %__MODULE__{acct | account_id: e.account_id, email: e.email, status: :open}
-  end
-
-  def apply(%__MODULE__{} = acct, %FundsWithdrawn{new_balance: bal}) do
-    %__MODULE__{acct | balance: bal}
-  end
-end
-
-# Router
-defmodule MyApp.Router do
-  use Commanded.Commands.Router
-  identify MyApp.Account, by: :account_id, prefix: "account-"
-  dispatch [OpenAccount, WithdrawFunds], to: MyApp.Account
-end
-```
-
-### Common Mistakes (BAD/GOOD)
-
-```elixir
-# BAD: Imperative event naming
-%PlaceOrder{order_id: "123"}         # This is a command name
-# GOOD: Past tense
-%OrderPlaced{order_id: "123"}
-
-# BAD: Side effects in aggregate
-def execute(%__MODULE__{}, %WithdrawFunds{} = cmd) do
-  HTTPClient.notify_bank(cmd)  # NEVER in aggregate
-  %FundsWithdrawn{...}
-end
-# GOOD: Event handler does side effects
-defmodule BankNotifier do
-  use Commanded.Event.Handler, application: MyApp.CommandedApp, name: __MODULE__
-  def handle(%FundsWithdrawn{} = event, _metadata), do: HTTPClient.notify(event)
-end
-
-# BAD: Missing data on events
-%FundsWithdrawn{account_id: "123", amount: 50}
-# GOOD: All derived data included
-%FundsWithdrawn{account_id: "123", amount: 50, new_balance: 150}
-
-# BAD: Testing internal state
-state = Account.apply(%Account{}, %FundsDeposited{amount: 100})
-assert state.balance == 100
-# GOOD: Test execute/2 output
-state = %Account{balance: 100, status: :open}
-assert %FundsWithdrawn{new_balance: 70} = Account.execute(state, %WithdrawFunds{amount: 30})
-```
+**Use when:** complex domains with audit trails, undo/replay, event-driven integration. **Don't use for:** simple CRUD, static data, OLAP. **Hybrid:** event source only critical bounded contexts.
 
 ## Testing
 
@@ -2276,23 +2377,6 @@ mix sobelow --details Config   # explain a specific category
 ]
 ```
 
-### Quality Alias
-
-```elixir
-defp aliases do
-  [
-    quality: [
-      "compile --warnings-as-errors",
-      "format --check-formatted",
-      "credo --strict",
-      "sobelow --strict",
-      "dialyzer",
-      "test --cover"
-    ]
-  ]
-end
-```
-
 ## Mix Essentials
 
 ### Common Tasks
@@ -2304,21 +2388,6 @@ mix test / mix test path:line / mix test --failed
 mix ecto.create / mix ecto.migrate / mix ecto.rollback
 mix format / mix format --check-formatted
 MIX_ENV=prod mix release
-```
-
-### Custom Task
-
-```elixir
-defmodule Mix.Tasks.MyApp.Setup do
-  use Mix.Task
-  @shortdoc "Setup the application"
-
-  @impl Mix.Task
-  def run(args) do
-    Mix.Task.run("deps.get", args)
-    Mix.Task.run("ecto.setup", args)
-  end
-end
 ```
 
 ## IEx Essentials
@@ -2365,25 +2434,6 @@ mix ecto.gen.migration create_users
 mix phx.gen.schema Blog.Post posts title:string body:text
 ```
 
-### Phoenix
-
-```bash
-mix phx.gen.html Accounts User users name:string email:string:unique
-mix phx.gen.json Accounts User users name:string email:string
-mix phx.gen.live Accounts User users name:string email:string
-mix phx.gen.context Accounts User users name:string
-mix phx.gen.auth Accounts User users
-```
-
-### Field Types
-
-```bash
-name:string  age:integer  price:decimal  active:boolean  body:text
-published_at:datetime  birth_date:date  inserted_at:utc_datetime
-user_id:references:users  tags:array:string  metadata:map
-email:string:unique  # With modifiers
-```
-
 ## Related Skills
 
 ### Native Code (NIFs)
@@ -2417,17 +2467,11 @@ email:string:unique  # With modifiers
 
 - **[nerves](../nerves/SKILL.md)** — Nerves firmware, VintageNet networking, OTA updates, hardware access, device trees, Buildroot customization.
   Key: use VintageNet for networking, validate firmware before confirming, always configure heart monitoring.
-- **[elixir-featherwings](../elixir-featherwings/SKILL.md)** — Adapting Adafruit FeatherWings to pure Elixir libraries for Nerves and AtomVM.
-  Key: I2C/GPIO/SPI backend patterns, mock testing for host-mode development.
-- **[erpc](../erpc/SKILL.md)** — Distributed Elixir communication between BEAM nodes and microcontrollers, rpc/erpc, Phoenix Telemetry, AtomVM.
-  Key: use erpc for reliable cross-node calls, Phoenix Telemetry for observability, AtomVM for MCU-side Elixir.
 - **[modbus](../modbus/SKILL.md)** — Modbus RTU/TCP industrial protocol with Elixir, Rust, C implementations.
   Key: RS-485 wiring, timing constraints, Elixir GenServer-based Modbus master/slave patterns.
 
 ### Desktop & Deployment
 
-- **[elixir-desktop](../elixir-desktop/SKILL.md)** — Cross-platform desktop and mobile apps with Phoenix LiveView and Elixir Desktop.
-  Key: native desktop apps using WebView, single codebase for desktop/mobile.
 - **[tauri-elixir](../tauri-elixir/SKILL.md)** — Desktop apps combining Tauri (Rust/WebView) with Phoenix LiveView, packaged as single binaries via Burrito.
   Key: Rust backend + LiveView UI, native system access through Tauri commands.
 - **[elixir-deployment](../elixir-deployment/SKILL.md)** — Mix releases, Docker, cloud providers, Kubernetes, security, observability, and production patterns.
