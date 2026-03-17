@@ -50,7 +50,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 12. **PREFER atoms over strings for internal identifiers.** Atoms are interned (fast comparison). Use strings only for user/external data.
 13. **PREFER `Map.new/2` and `Enum.into/2`** over `Enum.reduce/3` when building maps or other collectables from lists.
 14. **USE `Enum.reduce_while/3`** for early-exit accumulation instead of throwing or using flags. Return `{:cont, acc}` or `{:halt, acc}`.
-15. **NEVER use `Enum.each/2` to build a result.** `each/2` returns `:ok`, not the accumulated value. Use `map`, `reduce`, `filter`, or `for`.
+15. **USE `map`, `reduce`, `filter`, or `for` to collect results.** Choose the right function for the transformation needed.
 16. **ALWAYS use `@impl true`** on every behaviour callback implementation. It catches typos and missing callbacks at compile time.
 17. **ALWAYS use `%{struct | key: val}`** for struct updates, NEVER `Map.put(struct, key, value)`. The update syntax raises on unknown keys, providing compile-time safety.
 18. **ALWAYS distinguish between in-process validation and deferred external checks.** Validate data shape and rules immediately; defer uniqueness and referential checks to the database or external system. (In Ecto: `validate_*` runs immediately, `*_constraint` runs after DB write.)
