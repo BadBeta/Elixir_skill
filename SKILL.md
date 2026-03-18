@@ -17,7 +17,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 | [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction |
 | [quick-references.md](quick-references.md) | **LLM rules** (graphemes, atom safety, Enum.at, strftime) + **Elixir stdlib**: Enum (transform, filter, reduce, search, group, combine, access), Map (read, write, transform, pop, intersect), Keyword (read, write, split, validate), List (operations, tuple-list), String (split/join, trim/pad, search/test, transform, convert, **graphemes/codepoints/byte_size**, normalize), Regex, File/Path/System, URI/Base encoding, Date/Time (**Calendar.strftime**, **DateTime.shift**), IO/Inspect, Access/nested data, Process, Macro/Module (AST traversal), Range, Agent + **Erlang stdlib** (21 modules): :queue, :persistent_term, :atomics, :counters, :ets, :dets, :ordsets, :digraph, :gb_trees, :array, :math, :rand, :binary, :erlang, :lists, :timer, :crypto, :io_lib, :calendar, :unicode, :zlib, :os, :telemetry, :sys, :file + **JSON** (built-in 1.18+, Jason, safe JS interop) |
 | [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, comprehensions, function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, advanced patterns (pipeline, option registration, AST traversal, backoff) |
-| [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, readable code patterns (pipelines, guards, naming, conditionals), BAD/GOOD pairs |
+| [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, **module organization order**, **function ordering**, **multi-clause formatting**, **string sigil selection**, **defdelegate guidance**, **idiomatic formatter readability**, readable code patterns (pipelines, guards, naming, conditionals), 9 BAD/GOOD pairs |
 | [documentation.md](documentation.md) | @moduledoc/@doc patterns, @spec/@type/@typedoc, @since/@deprecated, doctests (multi-line, exceptions, ellipsis), ExDoc config, cross-references |
 | [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), **binary/String.t/iodata decision table**, **@spec `when` clause**, **common @spec patterns** (GenServer, Phoenix, Plug, LiveView), @type best practices, defguard types, **Dialyzer setup**, compiler warnings with fixes, dynamic(), inference, roadmap |
 | [architecture-reference.md](architecture-reference.md) | Architecture layouts, Phoenix contexts, layered/pipeline architecture, production patterns, anti-patterns catalog |
@@ -1061,8 +1061,11 @@ end
 
 > **Deep dive:** [code-style.md](code-style.md) — .formatter.exs configuration (line_length, locals_without_parens,
 > plugins, migration options since 1.18+), Credo check catalog (high-priority, readability, consistency),
-> pipeline readability (when to break, single-step anti-pattern), guard clause ordering (specific→general),
-> pattern match ordering, with-chain formatting, variable naming, pure logic separation, Ecto.Multi.
+> **module organization order** (use→behaviour→import→alias→require→attributes→types→functions), **function
+> ordering** (public with helpers vs all-public-first), **multi-clause formatting** (when to extract),
+> **string sigil selection table** (~s, ~S, ~r, ~w, ~c, heredoc), **defdelegate vs wrapper guidance**,
+> **idiomatic formatter readability** (intermediate variables, natural break points, then/1, whitespace
+> paragraphs), pipeline readability, guard clause ordering, with-chain formatting, variable naming.
 
 ## Behaviours, Callbacks & @impl
 

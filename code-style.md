@@ -300,28 +300,8 @@ changeset
 
 #### Import/Alias/Require Organization
 
-```elixir
-defmodule MyApp.Catalog do
-  @moduledoc "Product catalog management."
-
-  # 1. use — changes module behavior
-  use Ecto.Schema
-
-  # 2. import — brings functions into scope
-  import Ecto.Changeset
-  import Ecto.Query, warn: false
-
-  # 3. alias — creates shortcuts (alphabetized)
-  alias MyApp.Accounts.User
-  alias MyApp.Catalog.{Category, Product}
-  alias MyApp.Repo
-
-  # 4. require — compile-time macros
-  require Logger
-
-  # ... module attributes, types, functions
-end
-```
+See [Module Organization Order](#module-organization-order) below for the full 12-section template.
+Quick rule: `use` → `import` → `alias` (alphabetized) → `require`. Always group each kind together.
 
 #### Variable Naming for Readability
 
@@ -403,18 +383,20 @@ end
 ```elixir
 # GOOD: Named steps read as a story
 def transfer_funds(from, to, amount) do
-  Ecto.Multi.new()
-  |> Ecto.Multi.update(:debit, debit_changeset(from, amount))
-  |> Ecto.Multi.update(:credit, credit_changeset(to, amount))
-  |> Ecto.Multi.insert(:log, transfer_log(from, to, amount))
-  |> Repo.transaction()
-  |> case do
-    {:ok, %{debit: debit, credit: credit, log: log}} ->
+  result =
+    Ecto.Multi.new()
+    |> Ecto.Multi.update(:debit, debit_changeset(from, amount))
+    |> Ecto.Multi.update(:credit, credit_changeset(to, amount))
+    |> Ecto.Multi.insert(:log, transfer_log(from, to, amount))
+    |> Repo.transact()
+
+  case result do
+    {:ok, %{debit: _debit, credit: _credit, log: log}} ->
       {:ok, log}
-    {:error, :debit, changeset, _changes} ->
+    {:error, :debit, _changeset, _changes} ->
       {:error, :insufficient_funds}
-    {:error, failed_step, changeset, _changes} ->
-      {:error, {failed_step, changeset}}
+    {:error, _failed_step, _changeset, _changes} ->
+      {:error, :transfer_failed}
   end
 end
 ```
@@ -439,6 +421,289 @@ defmodule MyApp.Orders do
     |> Order.changeset(Map.put(params, :total, total))
     |> Repo.insert()
   end
+end
+```
+
+#### Module Organization Order
+
+The formatter doesn't enforce section order, but the community convention is:
+
+```elixir
+defmodule MyApp.Accounts.User do
+  @moduledoc """
+  User accounts and authentication.
+  """
+
+  # 1. use — changes module fundamentals
+  use Ecto.Schema
+
+  # 2. @behaviour — declares contracts this module fulfills
+  @behaviour MyApp.Authenticatable
+
+  # 3. import — brings functions into scope
+  import Ecto.Changeset
+
+  # 4. alias — shortens module references (alphabetized)
+  alias MyApp.Accounts.{Organization, Team}
+  alias MyApp.Repo
+
+  # 5. require — compile-time macros
+  require Logger
+
+  # 6. Module attributes — constants, config
+  @max_login_attempts 5
+  @token_ttl :timer.hours(24)
+
+  # 7. @type / @typep — type definitions
+  @type t :: %__MODULE__{}
+  @typep state :: :active | :suspended | :deleted
+
+  # 8. @callback — if this module defines a behaviour
+  # (not common — usually in a separate behaviour module)
+
+  # 9. Schema / struct definition
+  schema "users" do
+    field :email, :string
+    # ...
+  end
+
+  # 10. Public functions — the module's API
+  def create(attrs), do: ...
+  def get!(id), do: ...
+
+  # 11. Callback implementations (@impl true)
+  @impl true
+  def authenticate(credentials), do: ...
+
+  # 12. Private functions — in the order they're called from public functions
+  defp validate_email(changeset), do: ...
+  defp hash_password(changeset), do: ...
+end
+```
+
+**Key rules:**
+- Group related public functions together (all CRUD, all queries, all transformations)
+- Place private functions directly after the public function that calls them, or group at the bottom
+- `@compile` and `@dialyzer` attributes go after module attributes (section 6), before types
+
+#### Function Ordering Convention
+
+```elixir
+# GOOD: Public function followed by its private helpers
+def create_order(params) do
+  params
+  |> build_order()
+  |> apply_pricing()
+  |> Repo.insert()
+end
+
+defp build_order(params), do: ...
+defp apply_pricing(order), do: ...
+
+# Next public function and its helpers
+def cancel_order(order) do
+  order
+  |> validate_cancellable()
+  |> do_cancel()
+end
+
+defp validate_cancellable(order), do: ...
+defp do_cancel(order), do: ...
+```
+
+**Alternative (also acceptable):** All public functions first, then all private functions grouped logically. Pick one convention per project.
+
+#### Multi-Clause Function Formatting
+
+```elixir
+# GOOD: Short clauses — keep together, one line each
+def to_status(:pending), do: "Pending"
+def to_status(:active), do: "Active"
+def to_status(:archived), do: "Archived"
+
+# GOOD: Complex clauses — blank line between each
+def handle_event("save", params, socket) do
+  # multiple lines...
+end
+
+def handle_event("delete", %{"id" => id}, socket) do
+  # multiple lines...
+end
+
+def handle_event("validate", params, socket) do
+  # multiple lines...
+end
+
+# When a function has 5+ clauses, consider extracting
+# BAD: 8 clauses of handle_event in one module
+# GOOD: Extract to a helper or use a lookup
+@status_labels %{pending: "Pending", active: "Active", archived: "Archived"}
+def to_status(status), do: Map.fetch!(@status_labels, status)
+```
+
+#### String Sigil Selection
+
+| Sigil | Interpolation | Escapes | Use When |
+|-------|--------------|---------|----------|
+| `""` | Yes | Yes | Default — most strings |
+| `~s()` | Yes | Minimal | String contains `"` quotes |
+| `~S()` | No | No | Raw strings, regex patterns, doctests with `#{}` |
+| `~r()` | Yes | Regex | Regular expressions |
+| `~w()` | Yes | N/A | Word lists: `~w(foo bar baz)a` for atoms |
+| `~c()` | Yes | Yes | Charlists (Erlang interop) — replaces `'string'` |
+| `"""` | Yes | Yes | Multi-line strings, heredocs, long SQL |
+
+```elixir
+# GOOD: ~s when string has quotes
+~s(She said "hello")
+
+# GOOD: ~S in doctests with interpolation syntax (prevents execution)
+~S(#{not_interpolated})
+
+# GOOD: ~w for word lists
+~w(admin editor viewer)a   # atoms
+~w(pending active archived) # strings
+
+# GOOD: Heredoc for multi-line
+query = """
+SELECT u.name, count(p.id)
+FROM users u
+JOIN posts p ON p.user_id = u.id
+GROUP BY u.name
+"""
+
+# BAD: Escaped quotes when sigil is cleaner
+"She said \"hello\""
+```
+
+#### defdelegate — When to Use
+
+```elixir
+# GOOD: Public API delegates to implementation module — keeps context module clean
+defmodule MyApp.Accounts do
+  defdelegate get_user(id), to: MyApp.Accounts.UserQueries
+  defdelegate list_users(opts \\ []), to: MyApp.Accounts.UserQueries
+end
+
+# GOOD: Rename on delegation for better API
+defdelegate active_users, to: MyApp.Accounts.UserQueries, as: :list_active
+
+# BAD: Delegating when you need to add logic — use a wrapper instead
+# defdelegate create_user(attrs), to: MyApp.Accounts.UserCommands
+# ↑ If you need to broadcast after creation, delegation can't do that
+
+# GOOD: Wrapper when you need pre/post logic
+def create_user(attrs) do
+  case UserCommands.create_user(attrs) do
+    {:ok, user} = result ->
+      broadcast({:user_created, user})
+      result
+    error -> error
+  end
+end
+```
+
+**Rule:** Use `defdelegate` when the function is a pure pass-through. Use a wrapper function when you need any additional logic.
+
+#### Idiomatic Readability Within Formatter Rules
+
+The formatter handles layout, but you control structure. These patterns produce cleaner formatted output:
+
+**Leverage trailing comma position for readability:**
+```elixir
+# The formatter places trailing content after the last element
+# Structure your code to take advantage of this
+
+# GOOD: Keyword list as last argument stays inline or wraps cleanly
+Repo.insert(changeset,
+  on_conflict: :nothing,
+  conflict_target: :email,
+  returning: true
+)
+
+# GOOD: Map update syntax — formatter aligns nicely
+%{socket | assigns: Map.merge(socket.assigns, new_assigns)}
+```
+
+**Use intermediate variables to shorten formatted lines:**
+```elixir
+# BAD: Formatter wraps this into hard-to-read multi-line
+Enum.reduce(items, %{total: Decimal.new(0), count: 0}, fn item, %{total: total, count: count} ->
+  %{total: Decimal.add(total, item.price), count: count + 1}
+end)
+
+# GOOD: Name the accumulator — formatter produces cleaner output
+initial = %{total: Decimal.new(0), count: 0}
+
+Enum.reduce(items, initial, fn item, acc ->
+  %{acc | total: Decimal.add(acc.total, item.price), count: acc.count + 1}
+end)
+```
+
+**Break complex expressions at natural boundaries:**
+```elixir
+# BAD: One long expression — formatter breaks at arbitrary points
+from(u in User, join: p in assoc(u, :posts), where: p.published and u.active, select: %{name: u.name, post_count: count(p.id)}, group_by: u.id)
+
+# GOOD: Break at query clauses — each on its own line
+from u in User,
+  join: p in assoc(u, :posts),
+  where: p.published and u.active,
+  select: %{name: u.name, post_count: count(p.id)},
+  group_by: u.id
+```
+
+**Use `then/1` to keep pipelines flowing:**
+```elixir
+# BAD: Breaking the pipeline for a conditional
+result = data |> transform() |> validate()
+final = if condition, do: result |> extra_step(), else: result
+
+# GOOD: then/1 keeps it in the pipeline
+data
+|> transform()
+|> validate()
+|> then(fn result ->
+  if condition, do: extra_step(result), else: result
+end)
+```
+
+**Consistent map/keyword construction style:**
+```elixir
+# GOOD: Short maps on one line
+%{name: "Alice", role: :admin}
+
+# GOOD: Long maps one-key-per-line (formatter does this at line_length)
+%{
+  name: "Alice",
+  email: "alice@example.com",
+  role: :admin,
+  inserted_at: DateTime.utc_now()
+}
+
+# GOOD: Use variables to build maps incrementally for complex construction
+base = %{name: name, email: email}
+with_role = Map.put(base, :role, determine_role(attrs))
+with_timestamps = Map.merge(with_role, timestamps())
+```
+
+**Whitespace as paragraph breaks:**
+```elixir
+# GOOD: Blank lines separate logical phases within a function
+def process_order(params) do
+  # Phase 1: Build
+  order = build_order(params)
+  items = build_line_items(params.items)
+
+  # Phase 2: Calculate
+  subtotal = calculate_subtotal(items)
+  tax = calculate_tax(subtotal, params.region)
+  total = Decimal.add(subtotal, tax)
+
+  # Phase 3: Persist
+  order
+  |> Order.changeset(%{items: items, total: total})
+  |> Repo.insert()
 end
 ```
 
@@ -528,4 +793,59 @@ Process.send_after(self(), :cleanup, 86400 * 1000)
 @cleanup_interval :timer.hours(24)
 Process.send_after(self(), :cleanup, @cleanup_interval)
 ```
+
+**Missing `@doc false` on internal public functions:**
+```elixir
+# BAD: Omitting @doc — function appears undocumented in ExDoc
+def __handle_internal__(data), do: ...
+
+# GOOD: @doc false — explicitly hidden from ExDoc, Credo won't warn
+@doc false
+def __handle_internal__(data), do: ...
+
+# Also applies to public functions only used by macros or other modules internally
+@doc false
+def child_spec(opts), do: ...
+```
+
+**Inconsistent private function naming:**
+```elixir
+# BAD: Mixed naming conventions for helpers
+defp _internal_process(data), do: ...  # leading underscore = unused convention
+defp processHelper(data), do: ...     # camelCase
+
+# GOOD: Consistent snake_case, descriptive prefixes
+defp do_process(data), do: ...         # do_ prefix for recursive/core logic
+defp build_response(data), do: ...     # verb_ prefix describes action
+defp validate_input(data), do: ...
+```
+
+**Over-aliasing or under-aliasing:**
+```elixir
+# BAD: Aliasing a module used only once
+alias MyApp.Accounts.Users.ProfilePicture
+ProfilePicture.upload(user, file)
+
+# GOOD: Use the full path for one-off usage
+MyApp.Accounts.Users.ProfilePicture.upload(user, file)
+
+# BAD: No alias when module is used 3+ times
+MyApp.Billing.Invoices.InvoiceCalculator.subtotal(items)
+MyApp.Billing.Invoices.InvoiceCalculator.tax(items)
+MyApp.Billing.Invoices.InvoiceCalculator.total(items)
+
+# GOOD: Alias when used multiple times
+alias MyApp.Billing.Invoices.InvoiceCalculator
+InvoiceCalculator.subtotal(items)
+InvoiceCalculator.tax(items)
+InvoiceCalculator.total(items)
+```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — Code style rules (12), key BAD/GOOD pairs, deep-dive link
+- **[documentation.md](documentation.md)** — @moduledoc and @doc formatting, ExDoc rendering, doctest conventions, @doc group: metadata
+- **[language-patterns.md](language-patterns.md)** — Pattern matching depth, guard expressions, pipeline patterns, comprehension style
+- **[type-system.md](type-system.md)** — @spec writing conventions, when NOT to spec, @type best practices
+- **[testing-reference.md](testing-reference.md)** — Test naming conventions, describe block organization, setup patterns
 
