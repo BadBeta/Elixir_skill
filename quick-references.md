@@ -2,6 +2,35 @@
 
 > Supporting reference for the [Elixir skill](SKILL.md). Contains Enum, Map, Keyword, List, String, Regex, File/Path/System, URI/Encoding, Date/Time, IO/Inspect, Access/Nested Data, Process/Concurrency, Application/Code, Macro/Module, Range, Agent quick references, Erlang standard library (21 modules), and JSON encoding.
 
+## Rules for Using Elixir Standard Library (LLM)
+
+1. **ALWAYS use `String.graphemes/1`** to iterate over user-visible characters — never `String.split("", trim: true)` or `String.codepoints/1` (which splits multi-byte grapheme clusters)
+2. **NEVER use `String.to_atom/1`** with external input — atoms are not garbage collected. Use `String.to_existing_atom/1` or keep data as strings
+3. **NEVER use `Enum.at/2`** in loops on lists — it's O(n) per call. Pattern match head/tail or convert to a map/tuple for indexed access
+4. **PREFER `Calendar.strftime/2`** for date/time formatting over manual string interpolation — it handles padding, locale-aware formatting, and edge cases
+
+## Common Mistakes (BAD/GOOD)
+
+**Atom exhaustion from user input:**
+```elixir
+# BAD: creates atoms from external data — atom table is limited and never GC'd
+params |> Map.new(fn {k, v} -> {String.to_atom(k), v} end)
+
+# GOOD: convert to existing atoms only, or keep as strings
+params |> Map.new(fn {k, v} -> {String.to_existing_atom(k), v} end)
+# BEST: keep external keys as strings
+params  # %{"name" => "Jo"} — already safe
+```
+
+**O(n²) list indexing:**
+```elixir
+# BAD: Enum.at is O(n) per call — this is O(n²)
+for i <- 0..(length(list) - 1), do: Enum.at(list, i)
+
+# GOOD: use Enum.with_index or pattern matching
+Enum.with_index(list, fn elem, i -> {i, elem} end)
+```
+
 ## Quick References
 
 ### Enum Quick Reference
@@ -102,6 +131,8 @@ MapSet.new(enum)                 # Into set
 ```elixir
 Enum.concat(enum1, enum2)       # Concatenate enumerables
 Enum.intersperse(enum, sep)      # Insert separator between elements
+Enum.map_intersperse(enum, sep, fun) # Map then intersperse in one pass (1.18+)
+# Useful in HEEx: Enum.map_intersperse(items, ", ", &to_string/1)
 ```
 
 #### Access
@@ -143,6 +174,8 @@ Map.update!(map, key, fun)       # Update existing or raise
 Map.replace!(map, key, value)    # Replace existing or raise
 Map.merge(map1, map2)            # Combine (map2 wins conflicts)
 Map.merge(m1, m2, fn _k, v1, v2 -> v1 + v2 end)  # Custom conflict resolution
+Map.intersect(map1, map2)        # Keep only shared keys (map2 values win) (1.15+)
+Map.intersect(m1, m2, fn _k, v1, v2 -> v1 + v2 end)  # Custom conflict resolution
 ```
 
 #### Transform
@@ -359,6 +392,23 @@ String.replace_prefix("hello", "he", "she") # "shello"
 String.replace_suffix("hello", "lo", "p")   # "help"
 ```
 
+#### Characters & Bytes
+
+```elixir
+String.graphemes("héllo")               # ["h", "é", "l", "l", "o"] — user-visible characters
+String.codepoints("héllo")              # ["h", "é", "l", "l", "o"] — Unicode codepoints
+# graphemes vs codepoints: "é" is 1 grapheme but may be 2 codepoints (e + combining accent)
+String.graphemes("e\u0301")             # ["é"] — combined into single grapheme
+String.codepoints("e\u0301")            # ["e", "́"] — separate codepoints
+
+String.length("héllo")                  # 5 (grapheme count)
+String.byte_size("héllo")              # 6 (bytes — "é" is 2 bytes in UTF-8)
+# IMPORTANT: use byte_size for binary protocol sizes, length for user-facing counts
+
+String.normalize("e\u0301", :nfc)       # "é" — canonical composed form (1.18+)
+String.normalize("é", :nfd)             # "e\u0301" — decomposed form
+```
+
 #### Convert
 
 ```elixir
@@ -531,11 +581,18 @@ Time.utc_now()                   # ~T[12:00:00]
 # Truncate precision (very common with Ecto)
 DateTime.utc_now() |> DateTime.truncate(:second)
 
-# Arithmetic
+# Arithmetic — absolute units
 DateTime.add(dt, 3600, :second)  # Add 1 hour
 DateTime.add(dt, -1, :day)      # Subtract 1 day
 Date.add(date, 7)               # Add 7 days
 DateTime.diff(dt1, dt2, :second) # Seconds between
+
+# Arithmetic — calendar-aware (1.17+)
+DateTime.shift(dt, month: 1)     # Add 1 calendar month (handles 28/30/31 days)
+DateTime.shift(dt, year: 1, month: -3)  # Combine calendar units
+Date.shift(date, month: 6)      # Works on Date too
+# IMPORTANT: shift handles calendar semantics (Jan 31 + 1 month = Feb 28)
+# while add only works with absolute time units (seconds, days)
 
 # Comparison
 DateTime.compare(dt1, dt2)       # :lt | :eq | :gt
@@ -545,6 +602,9 @@ Date.compare(d1, d2)            # :lt | :eq | :gt
 DateTime.from_iso8601("2026-03-16T12:00:00Z")  # {:ok, dt, offset}
 Date.from_iso8601("2026-03-16")                 # {:ok, date}
 DateTime.to_iso8601(dt)                         # "2026-03-16T12:00:00Z"
+Calendar.strftime(dt, "%Y-%m-%d %H:%M")         # "2026-03-16 12:00"
+Calendar.strftime(dt, "%B %d, %Y")              # "March 16, 2026"
+Calendar.strftime(dt, "%I:%M %p")               # "12:00 PM"
 
 # Create
 Date.new!(2026, 3, 16)          # ~D[2026-03-16]
@@ -1549,37 +1609,9 @@ When passing Elixir data to JavaScript (LiveView, Alpine.js, hooks):
 
 **Rule:** Always use `JSON.encode!` when embedding Elixir data in JavaScript strings.
 
-## Mix Custom Tasks & Quality Aliases
+## Related Files
 
-### Custom Task
-
-```elixir
-defmodule Mix.Tasks.MyApp.Setup do
-  use Mix.Task
-  @shortdoc "Setup the application"
-
-  @impl Mix.Task
-  def run(args) do
-    Mix.Task.run("deps.get", args)
-    Mix.Task.run("ecto.setup", args)
-  end
-end
-```
-
-### Quality Alias
-
-```elixir
-# In mix.exs
-defp aliases do
-  [
-    quality: [
-      "compile --warnings-as-errors",
-      "format --check-formatted",
-      "credo --strict",
-      "sobelow --strict",
-      "dialyzer",
-      "test --cover"
-    ]
-  ]
-end
-```
+- **[SKILL.md](SKILL.md)** — Core Elixir rules, BAD/GOOD pairs, decision frameworks, top-function summaries
+- **[data-structures.md](data-structures.md)** — Data structure selection, performance characteristics, structs, binary patterns
+- **[language-patterns.md](language-patterns.md)** — Pattern matching, guards, pipelines (tap/then/dbg), behaviours, protocols, streams
+- **[production.md](production.md)** — Mix custom tasks, quality aliases, telemetry, HTTP clients

@@ -1615,6 +1615,41 @@ def call(conn, _opts) do
 end
 ```
 
+## Mix Custom Tasks & Quality Aliases
+
+### Custom Task
+
+```elixir
+defmodule Mix.Tasks.MyApp.Setup do
+  use Mix.Task
+  @shortdoc "Setup the application"
+
+  @impl Mix.Task
+  def run(args) do
+    Mix.Task.run("deps.get", args)
+    Mix.Task.run("ecto.setup", args)
+  end
+end
+```
+
+### Quality Alias
+
+```elixir
+# In mix.exs
+defp aliases do
+  [
+    quality: [
+      "compile --warnings-as-errors",
+      "format --check-formatted",
+      "credo --strict",
+      "sobelow --strict",
+      "dialyzer",
+      "test --cover"
+    ]
+  ]
+end
+```
+
 ## Related Files
 
 - **[SKILL.md](SKILL.md)** — Core Elixir rules, BAD/GOOD pairs, decision frameworks
