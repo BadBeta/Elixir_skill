@@ -1322,7 +1322,7 @@ def new(attrs) do
 end
 ```
 
-### Lists — Linked Lists
+### Lists — Singly Linked Lists
 
 ```elixir
 # O(1) prepend — ALWAYS build lists by prepending
