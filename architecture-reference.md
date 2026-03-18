@@ -1529,6 +1529,22 @@ Application Supervisor (:one_for_one)
 - **`:one_for_one`** = independent subsystems at the top level
 - **Endpoint last** = don't accept requests until everything is ready
 
+### Critical OTP Process Rules (from SKILL.md)
+
+These rules apply when **implementing** processes — not just when planning the supervision tree. Re-read before writing any GenServer, Task, or process code.
+
+1. **ALWAYS supervise processes.** Never use bare `spawn/spawn_link` for long-running work.
+2. **ALWAYS provide a client API** wrapping GenServer calls/casts — callers never use `GenServer.call(pid, ...)` directly.
+3. **PREFER call over cast.** Use cast only for fire-and-forget where losing messages is acceptable.
+4. **NEVER block GenServer callbacks with I/O, HTTP, or DB queries.** Offload to `Task` or use `handle_continue`. Common trap: blocking `:gen_tcp.accept`/`:gen_tcp.recv` in `handle_info` — use active mode (`:active, true`) or spawn an acceptor Task instead.
+5. **ALWAYS use `{:continue, _}` for post-init work** instead of slow/crashing `init/1`.
+6. **NEVER store large data (>100KB) in process state.** Use ETS for large/shared data.
+7. **ALWAYS use `via` tuples** for dynamic process registration — `{:via, Registry, {MyRegistry, key}}`.
+8. **ALWAYS match on specific messages in `handle_info`** — add a catch-all clause that logs unexpected messages.
+9. **ALWAYS use `start_supervised!` in tests** for processes — auto-cleanup prevents test pollution.
+
+> Full OTP reference: [otp-reference.md](otp-reference.md) — callback signatures, ETS operations, process debugging, release management
+
 ### OTP Applications as Architectural Boundaries
 
 Each OTP application is a deployment unit with its own supervision tree, configuration, and lifecycle. In umbrella/poncho projects, this maps directly to architectural boundaries.
