@@ -1,5 +1,100 @@
 # Production Elixir Patterns
 
+Real-world production patterns extracted from three open-source Elixir codebases: [changelog.com](https://github.com/thechangelog/changelog.com) (Phoenix web), [ExNVR](https://github.com/evercam/ex_nvr) (embedded IoT), and [Oban](https://github.com/oban-bg/oban) (job processing).
+
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [Production Phoenix Patterns](#production-phoenix-patterns-from-changelogcom) | Schema base modules, kit modules, response caching, authorization, controller injection, HTTP retry, cache cascade, soft delete |
+| [Edge/IoT Patterns](#edgeiot-patterns-from-exnvr) | Tick-based monitoring, periodic status collection, schedule validation, role-based auth, NIF modules, polymorphic embedded schemas |
+| [Job Processing Patterns](#job-processing-patterns-from-oban) | Worker behaviours, pluggable engines, backoff/jitter, dispatch cooldown, leader election, distributed notifier, cron expressions, CTE fencing |
+| [Telemetry](#telemetry) | Core API, span/3, built-in events, Telemetry.Metrics, custom instrumentation |
+| [HTTP Clients](#http-clients) | Req (default), Finch, testing with Req.Test and Mox |
+| [Plug halt/1 Semantics](#plug-halt1-semantics) | How halt works (flag, not execution stop) |
+
+## Rules for Production Elixir (LLM)
+
+1. ALWAYS use `Process.send_after/3` for periodic work — never `Process.sleep` in a loop (blocks the process, prevents message handling)
+2. ALWAYS debounce threshold-based actions — require N consecutive violations before acting to prevent thrashing on transient spikes
+3. ALWAYS use exponential backoff with jitter for retries — `base * 2^attempt` with random offset prevents thundering herd
+4. ALWAYS use `:telemetry.span/3` for instrumenting operations — it handles start/stop/exception events automatically
+5. ALWAYS call `halt()` after sending a response in plugs — `halt/1` sets a flag checked *between* plugs, it does NOT stop execution within your function
+6. PREFER Req over HTTPoison for new projects — built-in retries, JSON, auth, connection pooling via Finch
+7. PREFER database-backed leader election over `:global` locks in production — survives netsplits and doesn't require distributed Erlang
+8. NEVER scatter authorization logic across controllers — extract to a dedicated module with pattern-matching clauses ordered by specificity
+
+## Common Production Mistakes (BAD/GOOD)
+
+**Periodic work — sleep loop vs send_after:**
+```elixir
+# BAD: blocks process, can't handle other messages during sleep
+def handle_info(:check, state) do
+  do_check(state)
+  Process.sleep(60_000)
+  send(self(), :check)
+  {:noreply, state}
+end
+
+# GOOD: non-blocking timer, process remains responsive
+def handle_info(:check, state) do
+  do_check(state)
+  Process.send_after(self(), :check, 60_000)
+  {:noreply, state}
+end
+```
+
+**Threshold action — immediate vs debounced:**
+```elixir
+# BAD: acts on first spike, causes thrashing if metric fluctuates
+defp check_disk(usage, state) when usage >= 90, do: delete_old_files()
+
+# GOOD: requires N consecutive violations before acting
+defp check_disk(usage, %{ticks: t} = state) when usage >= 90 and t >= 5 do
+  delete_old_files()
+  %{state | ticks: 0}
+end
+defp check_disk(usage, state) when usage >= 90, do: %{state | ticks: state.ticks + 1}
+defp check_disk(_usage, state), do: %{state | ticks: 0}  # reset on recovery
+```
+
+**Telemetry — manual emission vs span:**
+```elixir
+# BAD: manual start/stop, easy to miss exception path
+:telemetry.execute([:my_app, :job, :start], %{}, meta)
+result = do_work()
+:telemetry.execute([:my_app, :job, :stop], %{duration: dur}, meta)
+
+# GOOD: span handles start, stop, AND exception automatically
+:telemetry.span([:my_app, :job], meta, fn ->
+  result = do_work()
+  {result, %{result_count: length(result)}}
+end)
+```
+
+**Plug — forgetting halt doesn't stop execution:**
+```elixir
+# BAD: code after halt() still runs, may cause double-send
+def call(conn, _opts) do
+  if unauthorized?(conn) do
+    conn |> send_resp(403, "Forbidden") |> halt()
+  end
+  # THIS STILL EXECUTES even when halted above!
+  do_work(conn)
+end
+
+# GOOD: use if/else or multi-clause to ensure single return path
+def call(conn, _opts) do
+  if unauthorized?(conn) do
+    conn |> send_resp(403, "Forbidden") |> halt()
+  else
+    do_work(conn)
+  end
+end
+```
+
+---
+
 ## Production Phoenix Patterns (from changelog.com)
 
 > Patterns extracted from [thechangelog/changelog.com](https://github.com/thechangelog/changelog.com) — a large-scale Phoenix application in production since 2015.
@@ -11,7 +106,7 @@
 | **Response Cache Plug** | Cache entire HTTP responses for unauthenticated users by request path |
 | **Policy Module** | Authorization with `defoverridable` defaults - `is_admin/1`, `is_editor/1` helpers |
 | **Controller Context Injection** | Override `action/2` to inject common assigns into all controller actions |
-| **HTTP Client Retry** | Wrap HTTP client with fallback SSL options on failure |
+| **HTTP Client SSL Fallback** | Req client with custom retry step for servers that fail with default TLS |
 | **Oban Telemetry Reporter** | Capture job failures via `:telemetry.attach` and forward to error tracking |
 | **Cache Cascade Deletion** | Delete related cache entries when primary entity changes |
 | **Soft Delete Subscription** | Track lifecycle with `unsubscribed_at` timestamp instead of hard delete |
@@ -241,28 +336,34 @@ end
 
 ### HTTP Client with SSL Fallback
 
-> Source: `Changelog.HTTP` — not a generic retry. Retries once with `middlebox_comp_mode: false` to handle servers that fail with default TLS settings.
+> Source: adapted from `Changelog.HTTP` — retries once with `middlebox_comp_mode: false` to handle servers that fail with default TLS settings. Rewritten with Req.
 
 ```elixir
 defmodule MyApp.HTTP do
-  @fallback_ssl [ssl: [{:middlebox_comp_mode, false}]]
-
-  def get(url, headers \\ [], opts \\ []) do
-    case HTTPoison.get(url, headers, opts) do
-      {:error, _} -> HTTPoison.get(url, headers, Keyword.merge(opts, @fallback_ssl))
-      response -> response
-    end
+  @doc "Reusable client with SSL fallback as a custom retry step."
+  def client(opts \\ []) do
+    Req.new(opts)
+    |> Req.Request.append_request_steps(ssl_fallback: &ssl_fallback_step/1)
   end
 
-  # Bang variant uses try/rescue since HTTPoison.get! raises
-  def get!(url, headers \\ [], opts \\ []) do
-    try do
-      HTTPoison.get!(url, headers, opts)
-    rescue
-      _ -> HTTPoison.get!(url, headers, Keyword.merge(opts, @fallback_ssl))
-    end
+  # Custom Req step — retry with relaxed SSL on connection failure
+  defp ssl_fallback_step(request) do
+    {request, fn {request, response_or_error} ->
+      case response_or_error do
+        %Req.TransportError{} ->
+          updated = Req.Request.put_private(request, :ssl_fallback_attempted, true)
+          fallback_opts = [connect_options: [transport_opts: [middlebox_comp_mode: false]]]
+          {Req.Request.merge_options(updated, fallback_opts), response_or_error}
+
+        _ ->
+          {request, response_or_error}
+      end
+    end}
   end
 end
+
+# Usage
+MyApp.HTTP.client() |> Req.get!(url: "https://finicky-server.example.com")
 ```
 
 ### Oban Telemetry Error Reporter
@@ -1320,9 +1421,9 @@ end
 
 ---
 
-## Telemetry Deep-Dive
+## Telemetry
 
-The `:telemetry` library is the standard way to instrument Elixir applications. Phoenix, Ecto, Oban, and Broadway all emit telemetry events automatically.
+The `:telemetry` library is the standard way to instrument Elixir applications. Phoenix, Ecto, Oban, and Broadway all emit telemetry events automatically. See also the [Oban Telemetry Error Reporter](#oban-telemetry-error-reporter) pattern above for a real-world `:telemetry.attach` example.
 
 **Core API:**
 
@@ -1398,6 +1499,28 @@ end
 ```
 
 VM metrics (`:vm.memory`, `:vm.total_run_queue_lengths`) require the `:telemetry_poller` dependency.
+
+**Custom telemetry module — multi-clause handler with logging:**
+
+```elixir
+defmodule MyApp.Telemetry do
+  require Logger
+
+  def attach_default_logger(opts \\ []) do
+    events = [[:my_app, :job, :start], [:my_app, :job, :stop], [:my_app, :job, :exception]]
+    :telemetry.attach_many("my-app-logger", events, &handle_event/4, opts)
+  end
+
+  defp handle_event([:my_app, :job, :start], _, meta, _),
+    do: Logger.info("[Job] Starting #{meta.worker}")
+  defp handle_event([:my_app, :job, :stop], m, meta, _),
+    do: Logger.info("[Job] Completed #{meta.worker} in #{div(m.duration, 1_000_000)}ms")
+  defp handle_event([:my_app, :job, :exception], _, meta, _),
+    do: Logger.error("[Job] Failed #{meta.worker}: #{inspect(meta.reason)}")
+end
+```
+
+> **Note:** PREFER `:telemetry.span/3` over manual start/stop emission. Only implement a custom `with_span` if you need non-standard metadata or measurement handling that `:telemetry.span/3` doesn't support.
 
 ## HTTP Clients
 
@@ -1492,36 +1615,10 @@ def call(conn, _opts) do
 end
 ```
 
-## Telemetry Integration Pattern (extended)
+## Related Files
 
-```elixir
-defmodule MyApp.Telemetry do
-  def with_span(event_prefix, meta, fun) do
-    start_time = System.monotonic_time()
-    start_meta = Map.put(meta, :system_time, System.system_time())
-    :telemetry.execute(event_prefix ++ [:start], %{system_time: start_meta.system_time}, start_meta)
-
-    try do
-      result = fun.()
-      duration = System.monotonic_time() - start_time
-      :telemetry.execute(event_prefix ++ [:stop], %{duration: duration}, Map.put(meta, :result, result))
-      result
-    rescue
-      exception ->
-        duration = System.monotonic_time() - start_time
-        :telemetry.execute(event_prefix ++ [:exception], %{duration: duration},
-          Map.merge(meta, %{kind: :error, reason: exception, stacktrace: __STACKTRACE__}))
-        reraise exception, __STACKTRACE__
-    end
-  end
-
-  def attach_default_logger(opts \\ []) do
-    events = [[:my_app, :job, :start], [:my_app, :job, :stop], [:my_app, :job, :exception]]
-    :telemetry.attach_many("my-app-logger", events, &handle_event/4, opts)
-  end
-
-  defp handle_event([:my_app, :job, :start], _, meta, _), do: Logger.info("[Job] Starting #{meta.worker}")
-  defp handle_event([:my_app, :job, :stop], m, meta, _), do: Logger.info("[Job] Completed #{meta.worker} in #{div(m.duration, 1_000_000)}ms")
-  defp handle_event([:my_app, :job, :exception], _, meta, _), do: Logger.error("[Job] Failed #{meta.worker}: #{inspect(meta.reason)}")
-end
-```
+- **[SKILL.md](SKILL.md)** — Core Elixir rules, BAD/GOOD pairs, decision frameworks
+- **[otp-advanced.md](otp-advanced.md)** — GenServer patterns (coordinated shutdown, subscriber resubscription, Broadway integration)
+- **[architecture-reference.md](architecture-reference.md)** — Pipeline architecture, configuration (compile_env vs runtime), refactoring guide
+- **[testing-examples.md](testing-examples.md)** — Mox, Oban testing, process testing, property-based testing
+- **[ecto-reference.md](ecto-reference.md)** — Changeset semantics, Ecto.Multi, telemetry events for queries
