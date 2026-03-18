@@ -321,11 +321,15 @@ be replaced by set-theoretic type signatures in a future Elixir version.
 
 # Struct type (convention: always define t/0)
 @type t :: %__MODULE__{
-  id: pos_integer(),
+  id: pos_integer() | nil,
   email: String.t(),
   role: :admin | :member | :guest,
-  inserted_at: DateTime.t()
+  inserted_at: DateTime.t() | nil
 }
+
+# IMPORTANT: Ecto schemas start with nil fields — Dialyzer catches this
+# when a fresh %Schema{} is passed to changeset/2. Add | nil to all
+# non-@enforce_keys fields that don't have a non-nil default value.
 
 # Opaque type — callers cannot inspect internals
 @opaque t :: %__MODULE__{data: map()}
@@ -341,7 +345,8 @@ be replaced by set-theoretic type signatures in a future Elixir version.
 
 ```elixir
 # ALWAYS define t/0 for structs — it's the convention all tools expect
-@type t :: %__MODULE__{id: pos_integer(), email: String.t(), role: role()}
+# For Ecto schemas: fields without defaults start as nil — include | nil
+@type t :: %__MODULE__{id: pos_integer() | nil, email: String.t() | nil, role: role()}
 
 # Use @opaque when callers should NOT pattern match on internals
 # Dialyzer will warn if callers destructure an opaque type

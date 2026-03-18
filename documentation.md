@@ -198,8 +198,8 @@ defmodule MyApp.User do
   @typedoc "A user account with email and role."
   @type t :: %__MODULE__{
     id: pos_integer() | nil,
-    email: String.t(),
-    role: role(),
+    email: String.t() | nil,
+    role: role() | nil,
     inserted_at: DateTime.t() | nil
   }
 

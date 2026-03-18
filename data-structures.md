@@ -540,11 +540,11 @@ defmodule Order do
   defstruct [:id, :items, :total, :status, created_at: nil]
 
   @type t :: %__MODULE__{
-    id: String.t(),
+    id: String.t() | nil,
     items: [item()],
-    total: Decimal.t(),
-    status: :pending | :confirmed | :shipped,
-    created_at: DateTime.t()
+    total: Decimal.t() | nil,
+    status: :pending | :confirmed | :shipped | nil,
+    created_at: DateTime.t() | nil
   }
 
   # Simple constructor — computes derived fields
@@ -708,12 +708,12 @@ end
 ```elixir
 defmodule Address do
   defstruct [:street, :city, :zip]
-  @type t :: %__MODULE__{street: String.t(), city: String.t(), zip: String.t()}
+  @type t :: %__MODULE__{street: String.t() | nil, city: String.t() | nil, zip: String.t() | nil}
 end
 
 defmodule Company do
   defstruct [:name, :address, employees: []]
-  @type t :: %__MODULE__{name: String.t(), address: Address.t(), employees: [User.t()]}
+  @type t :: %__MODULE__{name: String.t() | nil, address: Address.t() | nil, employees: [User.t()]}
 end
 
 # Direct struct update (clearest for shallow nesting):

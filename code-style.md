@@ -443,9 +443,13 @@ defmodule MyApp.Accounts.User do
   # 3. import — brings functions into scope
   import Ecto.Changeset
 
-  # 4. alias — shortens module references (alphabetized)
+  # 4. alias — shortens module references (STRICTLY alphabetized — Credo enforces)
   alias MyApp.Accounts.{Organization, Team}
   alias MyApp.Repo
+
+  # NOTE: Credo's AliasOrder check enforces strict alphabetical ordering.
+  # Do NOT order aliases by "dependency" or "importance" — always alphabetize.
+  # Grouped aliases ({A, B}) are sorted by the parent module name.
 
   # 5. require — compile-time macros
   require Logger
@@ -839,6 +843,41 @@ alias MyApp.Billing.Invoices.InvoiceCalculator
 InvoiceCalculator.subtotal(items)
 InvoiceCalculator.tax(items)
 InvoiceCalculator.total(items)
+```
+
+**Non-alphabetical alias ordering (Credo AliasOrder):**
+```elixir
+# BAD: Aliases ordered by "dependency" or "importance" — Credo rejects this
+alias MyApp.Sensors.Parser
+alias MyApp.Readings.CurrentRow
+alias MyApp.Repo
+
+# GOOD: Strictly alphabetical — Credo's AliasOrder check passes
+alias MyApp.Readings.CurrentRow
+alias MyApp.Repo
+alias MyApp.Sensors.Parser
+```
+
+**Large number literals without underscores (Credo LargeNumbers):**
+```elixir
+# BAD: Numbers > 9999 without underscores
+register = 40001
+timeout = 30000
+
+# GOOD: Underscores for readability
+register = 40_001
+timeout = 30_000
+```
+
+**Using length/1 for non-empty check (Credo):**
+```elixir
+# BAD: length/1 is O(n) — traverses entire list
+assert length(readings) > 0
+
+# GOOD: O(1) non-empty check
+assert readings != []
+# Or for exact count
+assert length(readings) == 5
 ```
 
 ## Related Files
