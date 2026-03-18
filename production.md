@@ -12,6 +12,7 @@ Real-world production patterns extracted from three open-source Elixir codebases
 | [Telemetry](#telemetry) | Core API, span/3, built-in events, Telemetry.Metrics, custom instrumentation |
 | [HTTP Clients](#http-clients) | Req (default), Finch, testing with Req.Test and Mox |
 | [Plug halt/1 Semantics](#plug-halt1-semantics) | How halt works (flag, not execution stop) |
+| [OpenApiSpex](#openapispex-api-documentation--validation) | Operation DSL, Schema modules, Parameter vs Schema properties, validation setup |
 
 ## Rules for Production Elixir (LLM)
 
@@ -1649,6 +1650,102 @@ defp aliases do
   ]
 end
 ```
+
+## OpenApiSpex (API Documentation & Validation)
+
+OpenApiSpex generates OpenAPI 3.0 specs from Phoenix controllers and validates request/response payloads at runtime.
+
+### Key Rule
+
+**NEVER put Schema properties on Parameter** — `enum`, `default`, `minimum`, `maximum`, `pattern`, `format` all belong inside `%Schema{}`, not on `%Parameter{}` or `Operation.parameter/5`.
+
+```elixir
+# BAD — :enum is not a Parameter field (raises KeyError)
+Operation.parameter(:status, :query, :string, "Filter by status",
+  enum: ["active", "inactive"]
+)
+
+# GOOD — enum belongs in Schema
+Operation.parameter(:status, :query,
+  %Schema{type: :string, enum: ["active", "inactive"]},
+  "Filter by status"
+)
+```
+
+### Operation DSL
+
+```elixir
+defmodule MyAppWeb.ReadingController do
+  use MyAppWeb, :controller
+  use OpenApiSpex.ControllerSpecs
+
+  alias OpenApiSpex.Schema
+
+  tags ["readings"]
+
+  operation :index,
+    summary: "List sensor readings",
+    parameters: [
+      sensor_id: [in: :path, type: :string, description: "Sensor ID", required: true],
+      status: [in: :query, schema: %Schema{type: :string, enum: ["active", "inactive"]}],
+      limit: [in: :query, type: :integer, description: "Max results"]
+    ],
+    responses: [
+      ok: {"Reading list", "application/json", ReadingListResponse}
+    ]
+
+  def index(conn, params) do
+    # params are validated against the spec automatically (if plug is added)
+  end
+end
+```
+
+### Schema Modules
+
+```elixir
+defmodule MyAppWeb.Schemas.Reading do
+  require OpenApiSpex
+  alias OpenApiSpex.Schema
+
+  OpenApiSpex.schema(%{
+    title: "Reading",
+    description: "A sensor reading",
+    type: :object,
+    required: [:sensor_id, :value, :timestamp],
+    properties: %{
+      sensor_id: %Schema{type: :string, format: :uuid},
+      value: %Schema{type: :number, format: :float},
+      unit: %Schema{type: :string, enum: ["celsius", "fahrenheit", "kelvin"]},
+      timestamp: %Schema{type: :string, format: :"date-time"}
+    }
+  })
+end
+```
+
+### Setup Essentials
+
+```elixir
+# mix.exs
+{:open_api_spex, "~> 3.22"}
+
+# router.ex — spec endpoint
+scope "/api" do
+  pipe_through :api
+  get "/openapi", OpenApiSpex.Plug.RenderSpec, []
+end
+
+# Add validation plug to your API pipeline (optional but recommended)
+plug OpenApiSpex.Plug.CastAndValidate, json_render_error_v2: true
+```
+
+### Common Mistakes
+
+| Mistake | Fix |
+|---------|-----|
+| `enum:` on Parameter | Move into `%Schema{enum: [...]}` |
+| Missing `required: true` on path params | Path params are always required — set explicitly |
+| Schema module not compiled | Ensure `require OpenApiSpex` before `OpenApiSpex.schema/1` |
+| Validation not running | Add `CastAndValidate` plug to pipeline |
 
 ## Related Files
 
