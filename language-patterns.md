@@ -524,6 +524,36 @@ end
 - Need lazy evaluation (`Stream`)
 - Readability with named pipeline steps
 
+## Function References & Capture
+
+```elixir
+# Capture operator (&)
+&Module.function/arity          # Reference to named function
+&(&1 + 1)                      # Short anonymous function (one arg)
+&(&1 + &2)                     # Multiple args
+&{&1, &2}                      # Returns tuple
+
+# When to use which:
+# Named function reference - prefer when function already exists
+Enum.map(list, &String.upcase/1)
+Enum.filter(list, &valid?/1)
+
+# Short capture - prefer for simple one-liners
+Enum.map(list, & &1 * 2)
+Enum.filter(list, & &1 > 0)
+
+# Full anonymous function - prefer for multi-line or pattern matching
+Enum.map(list, fn %{name: name, age: age} ->
+  "#{name} is #{age}"
+end)
+
+# Common captures
+&to_string/1                    # Kernel.to_string
+&is_nil/1                       # Kernel.is_nil
+&elem(&1, 0)                    # Get first tuple element
+&(&1)                           # Identity function
+```
+
 ## case and cond (full)
 
 ```elixir

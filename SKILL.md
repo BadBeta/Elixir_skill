@@ -14,7 +14,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 
 | File | Contents |
 |------|----------|
-| [data-structures.md](data-structures.md) | Lists, maps, tuples, keywords, MapSet, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary patterns |
+| [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction |
 | [quick-references.md](quick-references.md) | Enum, Map, Keyword, List, String, Regex, File/Path, URI, Date/Time, IO, Access, Process, Range, Agent quick refs, Erlang stdlib (21 modules), JSON |
 | [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, comprehensions, pipelines, behaviours, protocols, streams, error handling, advanced patterns |
 | [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, readable code patterns (pipelines, guards, naming, conditionals), BAD/GOOD pairs |
@@ -1332,6 +1332,15 @@ list = [new_item | existing_list]
 [first | rest] = [1, 2, 3]       # first=1, rest=[2,3]
 [a, b | rest] = [1, 2, 3]       # a=1, b=2, rest=[3]
 
+# Empty vs non-empty dispatch in function heads
+def process([]), do: :empty
+def process([_ | _] = list), do: Enum.map(list, &transform/1)
+
+# BAD: length/1 is O(n) — never use to check non-empty
+def process(list) when length(list) > 0, do: ...
+# GOOD: [_ | _] matches any non-empty list in O(1)
+def process([_ | _] = list), do: ...
+
 # BAD: O(n) append in loops = O(n^2)
 Enum.reduce(items, [], fn item, acc -> acc ++ [item] end)
 # GOOD: prepend then reverse = O(n)
@@ -1401,10 +1410,11 @@ put_elem(tuple, 1, :new_val)  # Returns new tuple (copies all)
 <<value::32-little-signed>> = <<0xFF, 0xFF, 0xFF, 0xFF>>  # value=-1
 ```
 
-> **Deep dive:** [data-structures.md](data-structures.md) — list operations (flatten, zip, foldl/foldr, charlist interop,
-> IO lists), maps (access, update, nested, patterns), tuples (tagged, ETS), keywords, MapSet (union,
-> intersection, difference), structs (constructors, pipelines, accumulator pattern, protocols, nesting,
-> GenServer state, anti-patterns), embedded schemas, function captures, binary pattern matching.
+> **Deep dive:** [data-structures.md](data-structures.md) — performance characteristics table, list operations
+> (flatten, zip, foldl/foldr, charlists, IO lists), maps (access, update, nested, patterns), tuples (tagged, ETS),
+> keywords, MapSet, ranges, Erlang data structures (:queue, :digraph, :ordsets), structs (constructors,
+> pipelines, accumulator pattern, protocols, nesting, GenServer state, anti-patterns), embedded schemas,
+> binary matching + construction with modifier reference.
 
 ## Quick References
 

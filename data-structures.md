@@ -1,6 +1,6 @@
 # Elixir Data Structures Reference
 
-> Supporting reference for the [Elixir skill](SKILL.md). Contains selection guide, lists (linked lists, IO lists, charlists), maps (access, update, nested, patterns), tuples (tagged tuples, ETS), keyword lists, MapSet, structs (define, construct, pattern match, update, pipelines, accumulator, protocols, nesting, GenServer state, anti-patterns), embedded schemas, map operations, function captures, and binary pattern matching.
+> Supporting reference for the [Elixir skill](SKILL.md). Contains selection guide, performance characteristics, lists (linked lists, head/tail idioms, IO lists, charlists), maps (access, update, nested, patterns), tuples (tagged tuples, ETS), keyword lists, MapSet, Ranges, Erlang data structures (:queue, :digraph, :ordsets), structs (define, construct, pattern match, update, pipelines, protocols, nesting, anti-patterns), embedded schemas, and binary patterns (matching + construction).
 
 ## Data Structures
 
@@ -8,18 +8,46 @@
 
 | Need | Use | Why |
 |---|---|---|
-| Key-value, known keys | Struct (`%Mod{}`) | Compile-time checks, dot access |
+| Key-value, known keys | Struct (`%Mod{}`) | Compile-time checks, dot access, O(1) field access |
 | Key-value, dynamic keys | Map (`%{}`) | O(log n) lookup, any key type |
 | Ordered collection | List (`[]`) | Linked list, O(1) prepend, pattern match head |
 | Fixed-size grouping | Tuple (`{}`) | O(1) element access, commonly 2-4 elements |
 | Function options | Keyword list (`[k: v]`) | Ordered, duplicate keys allowed, last-arg sugar |
 | Unique values | MapSet | Set operations (union, intersection, difference) |
+| Integer/step sequence | Range (`1..10//2`) | Lazy, O(1) membership check with `in` |
 | FIFO queue | `:queue` | O(1) amortized enqueue/dequeue |
 | Graph/dependencies | `:digraph` | Mutable directed graph with path algorithms |
 | Sorted unique set | `:ordsets` | Sorted list, good for small ordered sets |
 | Fast concurrent reads | ETS | In-memory table, cross-process access |
 
-### Lists — Linked Lists
+**When NOT to use:**
+- **MapSet** when you need ordered uniqueness → use `:ordsets` or `Enum.uniq/1`
+- **`:queue`** for small collections (<100 items) → a list is simpler and fast enough
+- **`:digraph`** for immutable graph data → it's mutable (ETS-backed), unusual for Elixir; consider a map of adjacency lists instead
+- **Keyword list** for performance-sensitive lookups → it's a list, O(n) access; use a map
+- **Tuple** as a variable-length collection → no Enum support, no head/tail matching; use a list
+
+### Performance Characteristics
+
+| Operation | List | Map | Struct | Tuple | MapSet | :queue | Keyword |
+|---|---|---|---|---|---|---|---|
+| Access by key/index | O(n) | O(log n) | O(1)¹ | O(1) | — | — | O(n) |
+| Membership test | O(n) | O(log n) | — | O(n) | O(log n) | O(n) | O(n) |
+| Prepend/add | O(1) | O(log n) | — | O(n)² | O(log n) | O(1)³ | O(1) |
+| Append | O(n) | — | — | O(n)² | — | O(1)³ | O(n) |
+| Delete | O(n) | O(log n) | — | O(n)² | O(log n) | — | O(n) |
+| Size/length | O(n) | O(1) | O(1) | O(1) | O(1) | O(n) | O(n) |
+| Enumerable | yes | yes | no | no | yes | no⁴ | yes |
+
+¹ `struct.field` is O(1) map lookup on atom key. ² Tuples copy all elements on update. ³ `:queue` amortized. ⁴ Convert with `:queue.to_list/1`.
+
+**Key performance rules:**
+- Lists: always prepend, never append in loops (O(n²))
+- Maps with ≤32 keys use flat structure; >32 use HAMT (both O(log n) but different constants)
+- `length/1` on lists is O(n) — track length separately if called frequently
+- Keyword lists are lists — same O(n) access. Use maps for performance-sensitive lookups
+
+### Lists — Singly Linked Lists
 
 Lists are singly-linked — O(1) prepend, O(n) append/access by index. This shapes all idiomatic patterns:
 
@@ -35,23 +63,69 @@ Lists are singly-linked — O(1) prepend, O(n) append/access by index. This shap
 [first, second | rest] = [1, 2, 3]  # first=1, second=2, rest=[3]
 [only] = [42]                        # Matches single-element list
 [] = []                              # Matches empty list
+```
 
-# Multi-clause with lists — the recursive pattern
-def sum([]), do: 0
-def sum([head | tail]), do: head + sum(tail)
+**Head/tail patterns in function heads** — the idiomatic way to dispatch on list shape:
 
+```elixir
+# Empty vs non-empty dispatch — [_ | _] matches any non-empty list
+def process([]), do: :empty
+def process([_ | _] = list), do: Enum.map(list, &transform/1)
+
+# Extract head element(s)
+def first_two([a, b | _rest]), do: {a, b}
+def first_two(_), do: :not_enough
+
+# Recursive processing — base case + cons cell destructuring
+def sum([], acc), do: acc
+def sum([head | tail], acc), do: sum(tail, acc + head)
+
+# Match on specific head values
+def handle_commands(["quit" | _]), do: :exit
+def handle_commands([cmd | rest]), do: {execute(cmd), rest}
+
+# Guard on non-empty — prefer [_ | _] over length checks
+# BAD: length/1 is O(n) — traverses entire list just to check non-empty
+def process(list) when length(list) > 0, do: ...
+# GOOD: pattern match is O(1)
+def process([_ | _] = list), do: ...
+# ALSO GOOD: guard with is_list + separate empty clause
+def process([]), do: :empty
+def process(list) when is_list(list), do: ...
+```
+
+**Building lists — always prepend:**
+
+```elixir
 # Prepend is O(1) — ALWAYS build lists by prepending
 list = [new_item | existing_list]
 
-# Append is O(n) — avoid in loops!
 # BAD: O(n) on every iteration = O(n^2) total
 Enum.reduce(items, [], fn item, acc -> acc ++ [item] end)
+
 # GOOD: prepend then reverse = O(n) total
 items |> Enum.reduce([], fn item, acc -> [item | acc] end) |> Enum.reverse()
+
 # BEST: just use Enum.map if transforming
 Enum.map(items, &transform/1)
 
-# List operations
+# Collecting filtered results — prepend + reverse
+def collect_valid(items) do
+  items
+  |> Enum.reduce([], fn item, acc ->
+    case validate(item) do
+      {:ok, valid} -> [valid | acc]
+      {:error, _} -> acc
+    end
+  end)
+  |> Enum.reverse()
+end
+# But prefer: Enum.flat_map(items, fn item -> case validate(item) do {:ok, v} -> [v]; _ -> [] end end)
+```
+
+**List operations:**
+
+```elixir
 length(list)                  # O(n) — must traverse entire list
 Enum.at(list, 0)             # O(n) — no index access
 List.first(list)              # O(1) — just head
@@ -77,6 +151,8 @@ List.update_at(list, 0, &(&1 + 1))  # Update at index (O(n))
 # Use charlists only for Erlang interop that requires them
 :io.format(~c"~p~n", [value])  # Erlang :io expects charlists
 ```
+
+> **Recursion patterns** (tail-call optimization, accumulators, build-and-reverse, tree traversal): see [SKILL.md — Recursion Patterns](SKILL.md#recursion-patterns).
 
 **IO Lists** — the fastest way to build output:
 
@@ -133,6 +209,9 @@ Map.take(map, [:a, :b])               # Keep only these keys
 Map.pop(map, key)                      # {value, rest_map}
 Map.reject(map, fn {_k, v} -> is_nil(v) end)  # Filter out entries
 Map.filter(map, fn {_k, v} -> v > 0 end)      # Keep matching entries
+Map.has_key?(map, key)                 # Boolean check
+Map.keys(map)                          # List of keys
+Map.values(map)                        # List of values
 
 # Nested access — works on maps, keyword lists, structs
 get_in(data, [:users, 0, :name])                    # Nested get
@@ -198,7 +277,6 @@ def handle_result({:error, reason}), do: raise "Failed: #{reason}"
 # Common in Erlang interop and internal data
 point = {10, 20}                    # {x, y}
 color = {255, 128, 0, 1.0}         # {r, g, b, alpha}
-range = {start, finish}             # {from, to}
 
 # ETS stores tuples — first element is typically the key
 :ets.insert(table, {user_id, username, email})
@@ -209,8 +287,6 @@ elem(tuple, 0)                # O(1) access by index
 put_elem(tuple, 1, :new_val)  # Returns new tuple (copies all elements)
 tuple_size(tuple)              # O(1) size
 Tuple.append(tuple, :val)     # Add at end (returns new tuple)
-Tuple.insert_at(tuple, 1, :v) # Insert at position
-Tuple.delete_at(tuple, 0)     # Remove at position
 
 # NEVER use tuples as variable-length collections
 # BAD: tuple as list replacement
@@ -295,6 +371,134 @@ active_ids =
   |> MapSet.new()
 ```
 
+### Ranges
+
+```elixir
+# Construction
+1..10                          # Ascending range (includes both endpoints)
+10..1//-1                      # Descending range (must specify step)
+1..100//5                      # Stepped range: 1, 6, 11, ..., 96
+0..0                           # Single-element range
+
+# Ranges are lazy — no list is created until consumed
+Enum.to_list(1..5)            # => [1, 2, 3, 4, 5]
+Enum.map(1..10, & &1 * 2)     # Transform without creating intermediate list
+
+# In guards — fast O(1) membership check
+def valid_age?(age) when age in 0..150, do: true
+
+# In for comprehensions
+for i <- 1..10, do: i * i
+
+# In pattern matching (Elixir 1.14+)
+case count do
+  n when n in 1..10 -> :small
+  n when n in 11..100 -> :medium
+  _ -> :large
+end
+
+# Range operations
+Range.size(1..10)              # 10
+Range.disjoint?(1..5, 6..10)  # true
+Range.shift(1..5, 3)          # 4..8
+
+# Common patterns
+# Slice from enumerable
+Enum.slice(list, 2..5)        # Elements at indices 2, 3, 4, 5
+String.slice("hello", 1..3)   # "ell"
+
+# Generate indices
+for {item, i} <- Enum.with_index(list), i in 2..5, do: item
+```
+
+### Erlang Data Structures
+
+#### :queue — FIFO Queue
+
+Use `:queue` instead of lists when you need efficient enqueue/dequeue from both ends. Lists are O(n) for append; `:queue` is O(1) amortized.
+
+```elixir
+q = :queue.new()
+q = :queue.in(:a, q)                  # Enqueue to back
+q = :queue.in(:b, q)                  # => {:a, :b}
+{{:value, item}, q} = :queue.out(q)   # Dequeue from front, item = :a
+:queue.peek(q)                        # {:value, :b} (don't remove)
+:queue.is_empty(q)                    # false
+:queue.to_list(q)                     # [:b]
+:queue.from_list([:a, :b, :c])        # Create from list
+:queue.len(q)                         # O(n) — track length manually if needed
+
+# Reverse operations
+q = :queue.in_r(:front, q)            # Enqueue to front
+{{:value, item}, q} = :queue.out_r(q) # Dequeue from back
+
+# Common pattern: bounded buffer
+defmodule BoundedQueue do
+  defstruct queue: :queue.new(), length: 0, max: 100
+
+  def enqueue(%__MODULE__{length: len, max: max} = bq, item) when len >= max do
+    {_, q} = :queue.out(bq.queue)  # Drop oldest
+    %{bq | queue: :queue.in(item, q)}
+  end
+
+  def enqueue(%__MODULE__{} = bq, item) do
+    %{bq | queue: :queue.in(item, bq.queue), length: bq.length + 1}
+  end
+end
+```
+
+**When to use `:queue` vs List:**
+| Pattern | Use |
+|---|---|
+| Stack (LIFO) — push/pop from head | List `[new | rest]` |
+| Queue (FIFO) — add to back, take from front | `:queue` |
+| Random access by index | Neither — use tuple or ETS |
+
+#### :digraph — Directed Graphs
+
+Mutable (ETS-backed) — unusual for Elixir. Use for graph algorithms, but always delete when done.
+
+```elixir
+g = :digraph.new()
+:digraph.add_vertex(g, :a)
+:digraph.add_vertex(g, :b)
+:digraph.add_vertex(g, :c)
+:digraph.add_edge(g, :a, :b)
+:digraph.add_edge(g, :b, :c)
+
+# Query
+:digraph.out_neighbours(g, :a)        # [:b]
+:digraph.in_neighbours(g, :c)         # [:b]
+
+# Path algorithms
+:digraph.get_short_path(g, :a, :c)    # [:a, :b, :c]
+:digraph_utils.topsort(g)             # Topological sort (false if cyclic)
+:digraph_utils.is_acyclic(g)          # true/false
+:digraph_utils.reachable([:a], g)     # All vertices reachable from :a
+
+# IMPORTANT: always delete when done — ETS tables leak otherwise
+:digraph.delete(g)
+```
+
+**Use cases:** dependency resolution, task scheduling, build systems. For immutable graph needs, consider a `%{vertex => [neighbours]}` map instead.
+
+#### :ordsets — Sorted Sets
+
+```elixir
+# Small sorted sets (backed by sorted lists — O(n) insert, O(n) lookup)
+s = :ordsets.new()                    # []
+s = :ordsets.add_element(:b, s)       # [:b]
+s = :ordsets.add_element(:a, s)       # [:a, :b] — sorted!
+:ordsets.is_element(:a, s)            # true
+:ordsets.union(s1, s2)                # Merge
+:ordsets.intersection(s1, s2)         # Common
+:ordsets.subtract(s1, s2)             # Difference
+```
+
+**Use `:ordsets` when:** you need sorted iteration and the set is small (<100 elements). For larger sets, use MapSet (unsorted but O(log n) operations).
+
+> **Full Erlang stdlib reference:** [quick-references.md](quick-references.md) — 21 Erlang modules including :persistent_term, :counters, :atomics, :timer, :crypto, :rand, :binary, :calendar, :math, :zlib.
+
 ### Structs
 
 Structs are named maps with compile-time guarantees. They are central to idiomatic Elixir — used as function arguments, pipeline state, GenServer state, and domain models.
@@ -322,6 +526,7 @@ end
 
 **Struct vs Map:**
 - Structs enforce keys at compile time (typos caught early)
+- `struct.field` is O(1) — same as map lookup on atom key
 - No `Access` protocol — use `user.field` not `user[:field]`
 - Pattern matching verifies struct type (`%User{}` won't match a plain map)
 - Include `__struct__` key for type identification
@@ -360,17 +565,6 @@ defmodule Order do
       {:ok, new(items)}
     end
   end
-end
-```
-
-**Constructor from keyword options** — use `struct!/2` to parse keywords with enforcement:
-
-```elixir
-# Pattern from Phoenix: parse keyword opts into struct fields
-def new!(opts) when is_list(opts) do
-  scope = struct!(__MODULE__, opts)
-  alias_name = scope.module |> Module.split() |> List.last() |> String.to_atom()
-  %{scope | alias: alias_name}
 end
 ```
 
@@ -418,11 +612,7 @@ user = %{user | name: "New Name"}
 # Multiple field update
 order = %{order | status: :shipped, shipped_at: DateTime.utc_now()}
 
-# Nested map field — use Map.merge or Map.put for map-valued fields
-socket = %{socket | assigns: Map.merge(socket.assigns, %{user: user, flash: "Done"})}
-
 # IMPORTANT: update syntax only works for EXISTING keys
-%User{} |> Map.put(:nonexistent, "val")  # Works (plain map operation, loses struct)
 %{%User{email: "a"} | nonexistent: "v"}  # ** KeyError — good, catches typos!
 ```
 
@@ -442,7 +632,6 @@ defmodule OrderProcessor do
   end
 
   defp validate_inventory(%Order{items: items} = order) do
-    # Check stock, raise if unavailable
     Enum.each(items, &check_stock!/1)
     order
   end
@@ -457,9 +646,7 @@ defmodule OrderProcessor do
     %{order | total: Decimal.add(total, tax)}
   end
 
-  defp set_status(%Order{} = order, status) do
-    %{order | status: status}
-  end
+  defp set_status(%Order{} = order, status), do: %{order | status: status}
 end
 ```
 
@@ -488,58 +675,11 @@ defp then_ok({:ok, val}, fun), do: fun.(val)
 defp then_ok({:error, _} = err, _fun), do: err
 ```
 
-#### Struct as Accumulator (Credo/Phoenix Pattern)
-
-Use a struct to accumulate state across pipeline stages — this is how Credo's `Execution` and Phoenix's `Conn` work:
-
-```elixir
-defmodule Pipeline do
-  defstruct [
-    :input,
-    :result,
-    assigns: %{},     # extensible key-value storage
-    private: %{},      # internal framework state (not user-facing)
-    halted: false,
-    errors: []
-  ]
-
-  @type t :: %__MODULE__{
-    input: term(),
-    result: term() | nil,
-    assigns: map(),
-    private: map(),
-    halted: boolean(),
-    errors: [term()]
-  }
-
-  def new(input), do: %__MODULE__{input: input}
-
-  # Assign arbitrary key-value pairs (Plug.Conn pattern)
-  def assign(%__MODULE__{} = pipeline, key, value) do
-    %{pipeline | assigns: Map.put(pipeline.assigns, key, value)}
-  end
-
-  # Halt pipeline processing
-  def halt(%__MODULE__{} = pipeline, reason) do
-    %{pipeline | halted: true, errors: [reason | pipeline.errors]}
-  end
-
-  # Run a pipeline stage, skip if halted
-  def run(%__MODULE__{halted: true} = pipeline, _fun), do: pipeline
-  def run(%__MODULE__{} = pipeline, fun) when is_function(fun, 1), do: fun.(pipeline)
-end
-
-# Usage — thread struct through stages
-Pipeline.new(raw_data)
-|> Pipeline.run(&parse/1)
-|> Pipeline.run(&validate/1)
-|> Pipeline.run(&transform/1)
-|> Pipeline.assign(:processed_at, DateTime.utc_now())
-```
+> **Struct as accumulator pattern** (Credo `Execution`, Phoenix `Conn`): see [architecture-reference.md](architecture-reference.md) — pipeline architecture section covers the assigns/private/halted pattern used by Plug, Credo, and Broadway.
 
 #### Structs with Protocols
 
-> See also: **Protocols** section in [SKILL.md](SKILL.md) for full protocol definition, implementation, @derive, and dispatch details.
+> See also: **Protocols** section in [language-patterns.md](language-patterns.md) for full protocol definition, implementation, @derive, and dispatch details.
 
 ```elixir
 # @derive for common protocols — declare before defstruct
@@ -552,7 +692,7 @@ end
 
 # Custom Inspect for sensitive structs (more control than @derive)
 defimpl Inspect, for: Credentials do
-  def inspect(%Credentials{username: username}, opts) do
+  def inspect(%Credentials{username: username}, _opts) do
     Inspect.Algebra.concat(["#Credentials<", username, ", password: [REDACTED]>"])
   end
 end
@@ -576,17 +716,14 @@ defmodule Company do
   @type t :: %__MODULE__{name: String.t(), address: Address.t(), employees: [User.t()]}
 end
 
-# Update nested struct — use put_in with Access-style paths
-company = %Company{name: "Acme", address: %Address{street: "1st", city: "Oslo", zip: "0001"}}
+# Direct struct update (clearest for shallow nesting):
+%{company | address: %{company.address | city: "Bergen"}}
 
-# These work because put_in/update_in work on maps (structs are maps):
+# put_in with Access-style paths (for deeper nesting):
 put_in(company, [Access.key(:address), Access.key(:city)], "Bergen")
 update_in(company, [Access.key(:address), Access.key(:zip)], &String.upcase/1)
 
-# Or use direct struct update (clearer for shallow nesting):
-%{company | address: %{company.address | city: "Bergen"}}
-
-# For deep nesting, write explicit helper functions:
+# Named helper functions (best for repeated deep updates):
 defmodule Company do
   def update_address(%__MODULE__{} = company, fun) when is_function(fun, 1) do
     %{company | address: fun.(company.address)}
@@ -594,53 +731,6 @@ defmodule Company do
 end
 
 company |> Company.update_address(&%{&1 | city: "Bergen"})
-```
-
-#### GenServer State as Struct
-
-```elixir
-defmodule CacheServer do
-  use GenServer
-
-  defstruct [
-    :name,
-    store: %{},
-    stats: %{hits: 0, misses: 0},
-    max_size: 1000,
-    ttl: :timer.minutes(5)
-  ]
-
-  @type t :: %__MODULE__{
-    name: atom(),
-    store: %{term() => {term(), integer()}},
-    stats: %{hits: non_neg_integer(), misses: non_neg_integer()},
-    max_size: pos_integer(),
-    ttl: pos_integer()
-  }
-
-  # Constructor validates and sets defaults
-  def start_link(opts) do
-    name = Keyword.fetch!(opts, :name)
-    state = struct!(__MODULE__, opts)
-    GenServer.start_link(__MODULE__, state, name: name)
-  end
-
-  @impl true
-  def init(%__MODULE__{} = state), do: {:ok, state}
-
-  @impl true
-  def handle_call({:get, key}, _from, %__MODULE__{} = state) do
-    case Map.get(state.store, key) do
-      {value, expires} when expires > System.monotonic_time(:millisecond) ->
-        {:reply, {:ok, value}, %{state | stats: bump_hits(state.stats)}}
-      _ ->
-        {:reply, :miss, %{state | stats: bump_misses(state.stats)}}
-    end
-  end
-
-  defp bump_hits(stats), do: %{stats | hits: stats.hits + 1}
-  defp bump_misses(stats), do: %{stats | misses: stats.misses + 1}
-end
 ```
 
 #### Common Anti-Patterns with Structs
@@ -673,7 +763,7 @@ defstruct [:core_field, config: %Config{}, assigns: %{}, private: %{}]
 
 ### Embedded Schemas (Validation Without Database)
 
-Use `embedded_schema` for data validation without database tables:
+Use Ecto's `embedded_schema` to validate data without database tables — ideal for API commands, LiveView forms, and config validation. Call `apply_action/2` to get `{:ok, struct}` or `{:error, changeset}`.
 
 ```elixir
 defmodule CreateUserCommand do
@@ -687,114 +777,33 @@ defmodule CreateUserCommand do
     field :age, :integer
   end
 
-  @doc "Validate params, return struct or error changeset"
   def validate(params) do
     %__MODULE__{}
     |> cast(params, [:email, :name, :age])
     |> validate_required([:email])
     |> validate_format(:email, ~r/@/)
-    |> validate_number(:age, greater_than: 0)
-    |> apply_action(:validate)  # Returns {:ok, struct} or {:error, changeset}
+    |> apply_action(:validate)
   end
 end
-
-# Usage - fail fast before expensive operations
-case CreateUserCommand.validate(params) do
-  {:ok, command} -> Accounts.create_user(command)
-  {:error, changeset} -> {:error, changeset}
-end
 ```
 
-**Use Cases:**
-- API input validation (command pattern)
-- LiveView forms without database backing
-- Configuration validation
-- External API response parsing
+> **Full Ecto examples:** [ecto-examples.md](ecto-examples.md) — embedded schemas, polymorphic validation, and more.
 
-**Key Point:** Call `apply_action/2` to get `{:ok, struct}` or `{:error, changeset}`. Without it, `changeset.valid?` works but errors won't display in forms.
+### Binary Patterns — Matching & Construction
 
-### Map Operations
+Parse and build binary protocols, file formats, network packets.
 
-```elixir
-# Create
-%{}                                    # Empty
-%{key: "value"}                        # Atom keys
-%{"key" => "value"}                    # String keys
-Map.new([{:a, 1}, {:b, 2}])           # From key-value pairs
-Map.new(users, &{&1.id, &1})          # From enumerable with function
+**Modifier reference:**
 
-# Read
-map.key                                # Atom key (raises if missing)
-map[:key]                              # Atom key (nil if missing)
-map["key"]                             # String key (nil if missing)
-Map.get(map, key, default)             # With default
-Map.fetch(map, key)                    # {:ok, val} or :error
-Map.fetch!(map, key)                   # Value or raise
-Map.has_key?(map, key)                 # Boolean
-Map.keys(map)                          # List of keys
-Map.values(map)                        # List of values
+| Modifier | Meaning | Example |
+|---|---|---|
+| `big` / `little` / `native` | Endianness | `<<x::32-big>>` |
+| `integer` / `float` / `binary` / `utf8` | Type | `<<x::float-64>>` |
+| `signed` / `unsigned` | Signedness | `<<x::16-signed>>` |
+| `size(n)` | Bit/byte count | `<<x::binary-size(4)>>` |
+| `unit(n)` | Bit multiplier for size | `<<x::size(3)-unit(8)>>` = 3 bytes |
 
-# Update (returns new map)
-Map.put(map, key, value)               # Set (create or overwrite)
-Map.put_new(map, key, value)           # Set only if key missing
-Map.put_new_lazy(map, key, fun)        # Lazy default
-%{map | key: new_value}                # Update existing (raises if missing!)
-Map.update(map, key, default, fun)     # Update with function or insert default
-Map.update!(map, key, fun)             # Update with function (raises if missing)
-Map.merge(map1, map2)                  # Merge (map2 wins on conflict)
-Map.merge(map1, map2, fn _k, v1, v2 -> v1 + v2 end)  # Merge with resolver
-
-# Delete
-Map.delete(map, key)                   # Remove key (no error if missing)
-Map.drop(map, [:a, :b])               # Remove multiple keys
-Map.take(map, [:a, :b])               # Keep only these keys
-Map.pop(map, key)                      # {value, rest_map}
-
-# Nested Access (works on maps, keyword lists, structs)
-get_in(data, [:users, 0, :name])                    # Nested get
-put_in(data, [:settings, :theme], "dark")            # Nested put
-update_in(data, [:stats, :count], & &1 + 1)          # Nested update
-pop_in(data, [:temp, :cache])                        # Nested pop
-get_in(data, [:users, Access.all(), :name])           # All user names
-get_in(data, [:items, Access.filter(&(&1.active))])   # Filtered access
-
-# Transform - build new map
-for {k, v} <- map, into: %{}, do: {k, transform(v)}
-```
-
-### Function References & Capture
-
-```elixir
-# Capture operator (&)
-&Module.function/arity          # Reference to named function
-&(&1 + 1)                      # Short anonymous function (one arg)
-&(&1 + &2)                     # Multiple args
-&{&1, &2}                      # Returns tuple
-
-# When to use which:
-# Named function reference - prefer when function already exists
-Enum.map(list, &String.upcase/1)
-Enum.filter(list, &valid?/1)
-
-# Short capture - prefer for simple one-liners
-Enum.map(list, & &1 * 2)
-Enum.filter(list, & &1 > 0)
-
-# Full anonymous function - prefer for multi-line or pattern matching
-Enum.map(list, fn %{name: name, age: age} ->
-  "#{name} is #{age}"
-end)
-
-# Common captures
-&to_string/1                    # Kernel.to_string
-&is_nil/1                       # Kernel.is_nil
-&elem(&1, 0)                    # Get first tuple element
-&(&1)                           # Identity function
-```
-
-### Binary Pattern Matching
-
-Parse binary protocols, file formats, network packets:
+**Matching (destructuring):**
 
 ```elixir
 # Fixed-size fields
@@ -816,7 +825,26 @@ Parse binary protocols, file formats, network packets:
 <<head::binary-size(4), _::binary>>  # First 4 bytes
 ```
 
-**Advanced binary patterns:**
+**Construction (building binaries):**
+
+```elixir
+# Build protocol packets
+<<0x01::8, payload_len::16, payload::binary>>
+
+# Pack integers with endianness
+<<port::16-big>>                     # 2-byte big-endian port number
+<<value::32-little-signed>>          # 4-byte little-endian signed int
+
+# Build from variables
+header = <<version::8, flags::8, length::16>>
+packet = <<header::binary, payload::binary>>
+
+# Length-prefixed string
+name_bytes = byte_size(name)
+<<name_bytes::8, name::binary>>
+```
+
+**Advanced patterns:**
 
 ```elixir
 # Pinned size — dynamic segment length from variable
@@ -832,7 +860,9 @@ defp process(<<>>), do: ...                                          # Empty bin
 # Reinterpret bytes as nibbles (for hex encoding)
 <<hi::4, lo::4>> = <<byte>>
 
-# Binary comprehension — iterate over bytes
+# Binary comprehension — iterate and transform bytes
 for <<byte <- binary>>, into: <<>>, do: <<byte + 1>>
-```
 
+# Binary comprehension — extract all 16-bit integers
+for <<value::16 <- binary>>, do: value
+```

@@ -343,6 +343,61 @@ defmodule MyApp.WorkerPool.Worker do
 end
 ```
 
+## GenServer State as Struct
+
+ALWAYS use a struct for GenServer state — it gives you `@type t`, `@enforce_keys`, compile-time key checks via `%{state | field: val}`, and self-documenting fields. Define the struct in the same module as the GenServer.
+
+```elixir
+defmodule MyApp.CacheServer do
+  use GenServer
+
+  defstruct [
+    :name,
+    store: %{},
+    stats: %{hits: 0, misses: 0},
+    max_size: 1000,
+    ttl: :timer.minutes(5)
+  ]
+
+  @type t :: %__MODULE__{
+    name: atom(),
+    store: %{term() => {term(), integer()}},
+    stats: %{hits: non_neg_integer(), misses: non_neg_integer()},
+    max_size: pos_integer(),
+    ttl: pos_integer()
+  }
+
+  # Constructor validates and sets defaults from opts
+  def start_link(opts) do
+    name = Keyword.fetch!(opts, :name)
+    state = struct!(__MODULE__, opts)
+    GenServer.start_link(__MODULE__, state, name: name)
+  end
+
+  @impl true
+  def init(%__MODULE__{} = state), do: {:ok, state}
+
+  @impl true
+  def handle_call({:get, key}, _from, %__MODULE__{} = state) do
+    case Map.get(state.store, key) do
+      {value, expires} when expires > System.monotonic_time(:millisecond) ->
+        {:reply, {:ok, value}, %{state | stats: bump_hits(state.stats)}}
+      _ ->
+        {:reply, :miss, %{state | stats: bump_misses(state.stats)}}
+    end
+  end
+
+  defp bump_hits(stats), do: %{stats | hits: stats.hits + 1}
+  defp bump_misses(stats), do: %{stats | misses: stats.misses + 1}
+end
+```
+
+**Key patterns:**
+- `struct!(__MODULE__, opts)` — parse keyword opts into struct, raises on unknown keys
+- `%__MODULE__{} = state` in callbacks — assertive match catches wrong state shape
+- `%{state | field: val}` — compile-time safety on updates (typos crash immediately)
+- Nested map fields (`stats`) updated with helper functions for clarity
+
 ## ETS Cache with TTL
 
 Based on patterns from Elixir's Registry (select_delete for cleanup) and Mix.State (persistent_term for config).
