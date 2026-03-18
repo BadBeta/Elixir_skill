@@ -1,4 +1,4 @@
-## Elixir skill for Claude
+# Elixir skill for Claude
 
 This is a rather ambitious project to make Claude do idiomatic Elixir both in architecture and code. The skill has a hub structure with a core skill aiming to cover the most crucial and daily bits, and with referenced supporting files covering more specialized topics. Only the core skill is loaded into the context when the skill is invoked. 
 
@@ -6,7 +6,9 @@ So far I've only sanitized this and the rust-nif skill. Other related skills mig
 
 
 
-**Install**  
+
+
+## **Install**  
 
 git clone git@github.com:BadBeta/Elixir_skill.git  ~/.claude/skills/elixir
 
@@ -18,7 +20,9 @@ cd ~/.claude/skills/elixir && git pull
 
 
 
-### First project prompt
+
+
+## First project prompt
 
 The first prompt should ensure that the skill is used during planning. Agents do not use skills so they have to be avoided.  Claude will also sometimes choose to ignore skills even if it says always use in the skill, so a stronger statement helps minimize that issue. 
 
@@ -28,7 +32,11 @@ Even after all that Claude will sometimes sneak in some more if statements than 
 
 
 
-### Better results by adding this to the first project or refactor prompt:
+
+
+## Better results by adding this to the first project or refactor prompt:
+
+
 
 **Do not use agents for planning or implementation. Do it yourself. **
 
