@@ -731,6 +731,111 @@ end
 - Need lazy evaluation (`Stream`)
 - Readability with named pipeline steps
 
+## Syntax Equivalences — Why Elixir Code Looks Different
+
+Elixir has three syntax features that combine to make the same code look very different depending on style. All forms below produce **identical AST** — the compiler sees no difference.
+
+### 1. Optional Parentheses
+
+Parentheses are optional on function calls with arguments:
+
+```elixir
+# These are identical:
+IO.puts("hello")
+IO.puts "hello"
+
+length([1, 2, 3])
+length [1, 2, 3]
+```
+
+**Exception:** Zero-arity calls require parentheses to distinguish from variables — `node()` calls the function, `node` references a variable.
+
+### 2. Keyword List Representations
+
+Keyword lists are lists of `{atom, value}` tuples. Elixir provides several layers of sugar — all forms below are identical at the AST level:
+
+```elixir
+# Level 1: Explicit tuple list
+[{:name, "Alice"}, {:age, 30}]
+
+# Level 2: Keyword sugar (colon moves to end of atom)
+[name: "Alice", age: 30]
+
+# Level 3: Brackets optional as last function argument
+String.split("a b c", " ", parts: 2, trim: true)
+String.split("a b c", " ", [{:parts, 2}, {:trim, true}])
+
+# Quoted atom keys (for atoms with special characters)
+["my-key": value]          # sugar for [{:"my-key", value}]
+["with spaces": value]     # sugar for [{:"with spaces", value}]
+```
+
+**Keyword lists vs map atom-key sugar** — the same `key: value` notation appears in maps too, but means something different:
+
+```elixir
+# Keyword list — list of tuples, ordered, allows duplicate keys
+[a: 1, b: 2]              # == [{:a, 1}, {:b, 2}]
+
+# Map with atom keys — hash map, unordered, unique keys
+%{a: 1, b: 2}             # == %{:a => 1, :b => 2}
+```
+
+### 3. `do/end` Blocks as Keyword Lists
+
+`do/end` blocks are syntactic sugar for `do:` keyword arguments. The block keywords (`do`, `else`, `rescue`, `catch`, `after`) become keyword list keys:
+
+```elixir
+# All three are identical:
+
+# do/end block style
+if condition do
+  :yes
+else
+  :no
+end
+
+# Keyword style
+if(condition, do: :yes, else: :no)
+
+# Explicit tuple list
+if(condition, [{:do, :yes}, {:else, :no}])
+```
+
+### Combined — DSL Syntax Explained
+
+These three features combine to enable DSL-style code (used by Ash, Ecto, Phoenix, etc.). All forms below compile to the same AST:
+
+```elixir
+# DSL style (no parens, do/end block) — common in Ash, Ecto migrations
+attribute :name, :string do
+  allow_nil? false
+end
+
+# Keyword style (no parens, trailing keyword list)
+attribute :name, :string, allow_nil?: false
+
+# Fully explicit (parens, bracketed keyword list)
+attribute(:name, :string, [allow_nil?: false])
+```
+
+Another example with `schema` and `field`:
+
+```elixir
+# Ecto DSL style
+schema "users" do
+  field :email, :string
+  timestamps()
+end
+
+# Desugared — what the compiler actually sees
+schema("users", [do: (
+  field(:email, :string)
+  timestamps()
+)])
+```
+
+**Why this matters for LLMs:** When generating code for frameworks like Ash, Phoenix, or Ecto, use the DSL style (no parentheses, `do/end` blocks) to match community conventions. When writing regular application code, use parentheses for clarity.
+
 ## Function References & Capture
 
 ```elixir
