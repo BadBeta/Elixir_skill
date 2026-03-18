@@ -569,6 +569,66 @@ defmodule MyApp.Application do
 end
 ```
 
+**When to refactor from flat to nested:** The flat `:one_for_one` tree above is fine initially (it's the Phoenix default). Once you have processes that depend on other processes' state, group them under sub-supervisors with the right strategy. Real-world example — Postgrex uses `:rest_for_one` to ensure Registry starts before DynamicSupervisor:
+
+```elixir
+# AFTER: Dependencies between children → extract sub-supervisor modules
+def start(_type, _args) do
+  children = [
+    MyAppWeb.Telemetry,
+    MyApp.InfrastructureSupervisor,   # :rest_for_one — Repo before PubSub
+    MyApp.DomainSupervisor,           # :rest_for_one — ETS owner before listeners
+    MyApp.WorkerPoolSupervisor,       # :one_for_all — Registry + DynamicSupervisor
+    MyAppWeb.Endpoint
+  ]
+  Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
+end
+
+# Infrastructure: if Repo crashes, PubSub restarts too (depends on Repo)
+defmodule MyApp.InfrastructureSupervisor do
+  use Supervisor
+  def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
+  def init(_arg) do
+    children = [
+      MyApp.Repo,
+      {Phoenix.PubSub, name: MyApp.PubSub}
+    ]
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+end
+
+# Domain: CurrentRow (ETS owner) must be alive for ListenerManager
+defmodule MyApp.DomainSupervisor do
+  use Supervisor
+  def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
+  def init(_arg) do
+    children = [
+      MyApp.Readings.CurrentRow,
+      MyApp.Sensors.ListenerManager
+    ]
+    Supervisor.init(children, strategy: :rest_for_one)
+  end
+end
+
+# Tightly coupled pair — if either dies, both restart
+# Pattern from Postgrex: Registry must exist before DynamicSupervisor
+defmodule MyApp.WorkerPoolSupervisor do
+  use Supervisor
+  def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
+  def init(_arg) do
+    children = [
+      {Registry, keys: :unique, name: MyApp.WorkerRegistry},
+      {DynamicSupervisor, name: MyApp.WorkerSupervisor}
+    ]
+    Supervisor.init(children, strategy: :one_for_all)
+  end
+end
+```
+
+**Rule of thumb:** If child B's state becomes invalid when child A restarts, group A and B under `:rest_for_one` (A before B). If A and B are tightly coupled peers, use `:one_for_all`. Keep `:one_for_one` at the top level for genuinely independent sub-trees.
+
+> Full supervision patterns: [otp-reference.md](otp-reference.md) and [otp-examples.md](otp-examples.md)
+
 ### Context Modules — Domain Boundaries
 
 Group related functionality into context modules — each is a public API boundary (DDD bounded context). This applies to any Elixir application, not just Phoenix.
