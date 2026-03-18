@@ -642,3 +642,10 @@ end
 # GOOD — Tests describe WHAT should happen, code describes HOW
 # If you write tests after, pretend the implementation doesn't exist
 ```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — 12 testing rules, ExUnit fundamentals, Mox pattern, key assertions
+- **[testing-examples.md](testing-examples.md)** — Complete examples: CaseTemplate, Ecto Sandbox, Mox patterns, LiveView testing, property-based testing, Oban, OTP process testing
+- **[production.md](production.md)** — Production telemetry patterns (complements telemetry testing)
+- **[ecto-reference.md](ecto-reference.md)** — Changeset and query patterns (tested via DataCase)

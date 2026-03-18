@@ -2,6 +2,43 @@
 
 > Supporting reference for the [Elixir skill](SKILL.md). Contains IO.inspect, dbg, IEx.pry, break!, Rexbug tracing, system introspection, Logger, mix profile (fprof/eprof/cprof/tprof), Benchee, memory profiling, VM/scheduler profiling, allocator profiling, :sys module tracing, and telemetry-based profiling.
 
+## Rules for Debugging & Profiling (LLM)
+
+1. **ALWAYS start with `IO.inspect` or `dbg`** before reaching for heavier tools — most bugs are found with simple value inspection.
+2. **ALWAYS use `dbg()` over `IO.inspect` in pipelines** (Elixir 1.14+) — it shows every intermediate step automatically.
+3. **NEVER use `:dbg` or `:erlang.trace` in production** — no safety limits, can crash nodes. Use `:recon_trace` or Rexbug with explicit message count limits.
+4. **ALWAYS use `System.monotonic_time` for duration measurement** — never `System.system_time` (jumps on NTP sync).
+5. **ALWAYS use Benchee for comparisons** — never single `:timer.tc` calls (no warmup, no statistical analysis).
+6. **PREFER `:sys.trace` over manual message inspection** for debugging OTP process message flow — it shows formatted in/out messages.
+
+## Common Mistakes (BAD/GOOD)
+
+**Profiling without warmup or statistics:**
+```elixir
+# BAD: Single measurement — JIT not warmed up, no variance info
+{usec, _} = :timer.tc(fn -> my_function() end)
+IO.puts("Took #{usec}μs")  # Misleading — could be 10x slower than steady-state
+```
+
+```elixir
+# GOOD: Benchee with warmup and statistical analysis
+Benchee.run(%{"my_function" => fn -> my_function() end}, warmup: 2, time: 5)
+```
+
+**Unsafe production tracing:**
+```elixir
+# BAD: No limits — unbounded trace messages can crash the node
+:dbg.tracer()
+:dbg.p(:all, :c)
+:dbg.tp(MyModule, :_, :x)
+```
+
+```elixir
+# GOOD: recon_trace with automatic limit
+:recon_trace.calls({MyModule, :_, :return_trace}, 100)  # Stops after 100 traces
+:recon_trace.clear()
+```
+
 ## Debugging
 
 ### IO.inspect/2
@@ -18,11 +55,62 @@ data
 
 ### dbg/2 (Elixir 1.14+)
 
+A macro that prints the AST and result of each step. Returns the value unchanged, so it's pipeline-safe.
+
 ```elixir
+# Pipeline — shows every intermediate step with values
 [1, 2, 3]
 |> Enum.map(&(&1 * 2))
 |> Enum.filter(&(&1 > 2))
-|> dbg()  # Shows each step with values
+|> dbg()
+# Prints:
+#   [1, 2, 3] #=> [1, 2, 3]
+#   |> Enum.map(&(&1 * 2)) #=> [2, 4, 6]
+#   |> Enum.filter(&(&1 > 2)) #=> [4, 6]
+
+# Non-pipeline expressions — works with case, cond, with, if
+case Map.fetch(data, :key) do
+  {:ok, value} -> process(value)
+  :error -> default()
+end
+|> dbg()  # Shows the matched clause and result
+
+# No args — shows all current bindings
+def process(data, opts) do
+  result = transform(data)
+  dbg()  # Prints: data => ..., opts => ..., result => ...
+  finalize(result)
+end
+
+# Returns value — can insert anywhere without breaking the chain
+value = dbg(expensive_computation())  # prints and returns
+```
+
+**dbg with pry mode:**
+
+```elixir
+# Make dbg drop into IEx.pry instead of printing
+# Start IEx with:
+iex --dbg pry -S mix
+
+# Now dbg() pauses execution like IEx.pry()
+data |> transform() |> dbg()  # Pauses here, inspect bindings
+```
+
+**Custom dbg backend:**
+
+```elixir
+# Route dbg output to Logger instead of IO
+Application.put_env(:elixir, :dbg_callback, {MyApp.Debug, :log_dbg, []})
+
+defmodule MyApp.Debug do
+  def log_dbg(code, options, env) do
+    header = "#{env.file}:#{env.line}"
+    result = Macro.dbg(code, options, env)
+    Logger.debug("dbg at #{header}: #{inspect(result)}")
+    result
+  end
+end
 ```
 
 ### IEx.pry — Interactive Breakpoint Debugging
@@ -736,3 +824,11 @@ end
 | "Is there a binary memory leak?" | `:erlang.memory(:binary)` before/after GC |
 | "What's my GenServer doing right now?" | `:sys.trace(pid, true)` or `Process.info(pid, :current_stacktrace)` |
 | "Production monitoring?" | Telemetry + LiveDashboard or observer_cli |
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — Debugging essentials (IO.inspect, dbg, IEx.pry), profiling quick reference, quality tools
+- **[otp-reference.md](otp-reference.md)** — Process info keys, :sys module, debugging quick reference (lighter overlap)
+- **[otp-advanced.md](otp-advanced.md)** — Production debugging patterns: finding problem processes, safe tracing, binary leak detection, ETS analysis
+- **[production.md](production.md)** — Telemetry deep-dive, production monitoring patterns
+- **[testing-reference.md](testing-reference.md)** — Debugging failing tests, async failure diagnosis
