@@ -1472,3 +1472,56 @@ end
 # test_helper.exs
 Mox.defmock(MyApp.HTTPClientMock, for: MyApp.HTTPClient)
 ```
+
+## Plug halt/1 Semantics
+
+`halt/1` sets a flag — it does NOT stop execution of the current plug:
+
+```elixir
+# halt/1 just sets halted: true on the conn
+def halt(%Conn{} = conn), do: %{conn | halted: true}
+
+# The compiled pipeline checks the flag BETWEEN plugs, not during
+# Your plug must still return the conn after halting
+def call(conn, _opts) do
+  conn
+  |> put_status(403)
+  |> send_resp(403, "Forbidden")
+  |> halt()   # Sets flag; subsequent plugs in pipeline are skipped
+  # Code AFTER halt() in this function still executes!
+end
+```
+
+## Telemetry Integration Pattern (extended)
+
+```elixir
+defmodule MyApp.Telemetry do
+  def with_span(event_prefix, meta, fun) do
+    start_time = System.monotonic_time()
+    start_meta = Map.put(meta, :system_time, System.system_time())
+    :telemetry.execute(event_prefix ++ [:start], %{system_time: start_meta.system_time}, start_meta)
+
+    try do
+      result = fun.()
+      duration = System.monotonic_time() - start_time
+      :telemetry.execute(event_prefix ++ [:stop], %{duration: duration}, Map.put(meta, :result, result))
+      result
+    rescue
+      exception ->
+        duration = System.monotonic_time() - start_time
+        :telemetry.execute(event_prefix ++ [:exception], %{duration: duration},
+          Map.merge(meta, %{kind: :error, reason: exception, stacktrace: __STACKTRACE__}))
+        reraise exception, __STACKTRACE__
+    end
+  end
+
+  def attach_default_logger(opts \\ []) do
+    events = [[:my_app, :job, :start], [:my_app, :job, :stop], [:my_app, :job, :exception]]
+    :telemetry.attach_many("my-app-logger", events, &handle_event/4, opts)
+  end
+
+  defp handle_event([:my_app, :job, :start], _, meta, _), do: Logger.info("[Job] Starting #{meta.worker}")
+  defp handle_event([:my_app, :job, :stop], m, meta, _), do: Logger.info("[Job] Completed #{meta.worker} in #{div(m.duration, 1_000_000)}ms")
+  defp handle_event([:my_app, :job, :exception], _, meta, _), do: Logger.error("[Job] Failed #{meta.worker}: #{inspect(meta.reason)}")
+end
+```

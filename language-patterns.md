@@ -1,32 +1,12 @@
 # Elixir Language Patterns — Deep Dive
 
-> Supporting reference for the [Elixir skill](SKILL.md). Contains extended pattern matching, guards, comprehensions, pipelines, behaviours, protocols, streams, error handling, and advanced patterns. See also: [code-style.md](code-style.md), [documentation.md](documentation.md).
+> Supporting reference for the [Elixir skill](SKILL.md). Contains extended pattern matching, guards, comprehensions, pipelines, behaviours, protocols, streams, error handling, and advanced patterns. Core patterns and rules are in [SKILL.md](SKILL.md) — this file covers additional depth, edge cases, and extended examples. See also: [code-style.md](code-style.md), [documentation.md](documentation.md).
 
 ## Pattern Matching (extended)
 
-### Multi-Clause Functions Over Conditionals
+> Core pattern matching (multi-clause, tagged tuples, head/tail, pin, guards, case/cond, match?/2) is in [SKILL.md](SKILL.md). This section covers additional patterns and edge cases.
 
-Use multiple function clauses with pattern matching instead of if/else:
-
-```elixir
-# BAD
-def process_user(user) do
-  if user != nil do
-    if user.active, do: {:ok, user}, else: {:error, "inactive"}
-  else
-    {:error, "not found"}
-  end
-end
-
-# GOOD
-def process_user(%{active: true} = user), do: {:ok, user}
-def process_user(%{active: false}), do: {:error, "inactive"}
-def process_user(nil), do: {:error, "not found"}
-```
-
-Order clauses from most specific to least specific (catch-all last).
-
-#### Pattern-Based Dispatch
+### Pattern-Based Dispatch
 
 ```elixir
 defmodule Formatter do
@@ -41,28 +21,7 @@ defmodule Formatter do
 end
 ```
 
-#### Bad: If/Else Chain
-
-```elixir
-# AVOID THIS
-def format(value) do
-  if is_struct(value, Date) do
-    Calendar.strftime(value, "%Y-%m-%d")
-  else
-    if is_struct(value, DateTime) do
-      Calendar.strftime(value, "%Y-%m-%d %H:%M:%S")
-    else
-      if is_binary(value) do
-        value
-      else
-        to_string(value)
-      end
-    end
-  end
-end
-```
-
-#### Default Arguments
+### Default Arguments with Multi-Clause
 
 ```elixir
 # Header clause defines defaults
@@ -77,27 +36,9 @@ def paginate(query, opts) do
 end
 ```
 
-### Core Pattern Matching
+### String Prefix Matching
 
 ```elixir
-# Function arguments — struct + field extraction
-def current_path(%Plug.Conn{query_string: ""} = conn), do: conn.request_path
-def current_path(%Plug.Conn{query_string: q} = conn), do: "#{conn.request_path}?#{q}"
-
-# Tagged tuples
-def handle({:ok, value}), do: process(value)
-def handle({:error, reason}), do: log_error(reason)
-
-# Lists — head/tail, non-empty, specific length
-def sum([head | tail], acc), do: sum(tail, acc + head)
-def sum([], acc), do: acc
-def first([item | _]), do: item                    # First element
-def first_two([a, b | _rest]), do: {a, b}          # First two
-def singleton?([_]), do: true                       # Exactly one element
-def singleton?(_), do: false
-def non_empty?([_ | _]), do: true                  # Any non-empty list
-def non_empty?(_), do: false
-
 # String prefix matching with <>
 def join("room:" <> room_id, _payload, socket), do: ...  # Phoenix Channel pattern
 def parse("Bearer " <> token), do: {:ok, token}
@@ -105,7 +46,7 @@ def parse(_), do: {:error, :invalid_scheme}
 # NOTE: <> can ONLY match prefixes, not suffixes. Use String.ends_with?/2 for suffixes.
 ```
 
-#### Extracting Nested Data
+### Extracting Nested Data
 
 ```elixir
 def get_user_city(%{address: %{city: city}}), do: {:ok, city}
@@ -117,7 +58,7 @@ def get_user_city(%{address: _}), do: "Unknown"
 def get_user_city(_), do: "No address"
 ```
 
-#### Binary Pattern Matching
+### Binary Pattern Matching
 
 ```elixir
 # Parse fixed-width fields
@@ -135,7 +76,7 @@ def first_char(<<char::utf8, _rest::binary>>), do: <<char::utf8>>
 def first_char(""), do: ""
 ```
 
-#### Map Updates
+### Map Updates
 
 ```elixir
 def increment_count(%{count: count} = state) do
@@ -148,13 +89,38 @@ def update_user_email(state, user_id, email) do
 end
 ```
 
-### Pin Operator (^) — Match Against Existing Values
+### Assertive Pattern Matching
+
+Let functions crash on unexpected input — makes bugs visible immediately:
 
 ```elixir
-# Simple pin — match against existing variable (don't rebind)
-target_id = 42
-Enum.find(users, fn %{id: ^target_id} -> true; _ -> false end)
+# BAD - hides malformed input, returns wrong value
+def get_value(string, key) do
+  parts = String.split(string, "&")
+  Enum.find_value(parts, fn pair ->
+    key_value = String.split(pair, "=")
+    Enum.at(key_value, 0) == key && Enum.at(key_value, 1)
+  end)
+end
 
+# GOOD - pattern match asserts structure, crashes on malformed input
+def get_value(string, key) do
+  Enum.find_value(String.split(string, "&"), fn pair ->
+    [k, value] = String.split(pair, "=")
+    k == key && value
+  end)
+end
+
+# GOOD - extract only what guard needs, destructure in body
+def drive(%User{age: age} = user) when age >= 18 do
+  %User{name: name, license: license} = user
+  "#{name} with license #{license} can drive"
+end
+```
+
+### Pin Operator (^) — Advanced Uses
+
+```elixir
 # Pin as map key — essential for dynamic key lookup
 key = :email
 case map do
@@ -178,6 +144,16 @@ case state.channels do
   %{^pid => {^topic, join_ref}} -> handle_existing(join_ref)
   %{^pid => _} -> handle_wrong_topic()
   _ -> handle_new()
+end
+
+# Pin in comprehension generators
+target = 42
+for %{id: ^target, data: data} <- records, do: data
+
+# Pin in with clauses
+expected = "admin"
+with %{role: ^expected} <- get_user(id) do
+  :authorized
 end
 ```
 
@@ -326,6 +302,78 @@ end
 # Bitwise.&&&, Bitwise.|||, Bitwise.bsl, Bitwise.bsr also allowed in guards
 ```
 
+## case and cond (extended)
+
+> Basic case/cond patterns are in [SKILL.md](SKILL.md). This section covers advanced usage.
+
+**cond with variable binding** — assign in condition, use in body:
+
+```elixir
+# Priority-based config resolution (from Absinthe)
+cond do
+  executor = Keyword.get(opts, :executor) ->
+    executor
+
+  executor = get_in(opts, [:context, :streaming_executor]) ->
+    executor
+
+  schema && function_exported?(schema, :__streaming_executor__, 0) ->
+    schema.__streaming_executor__()
+
+  executor = Application.get_env(:my_app, :executor) ->
+    executor
+
+  true ->
+    DefaultExecutor
+end
+
+# Only/except option handling (from Jason encoder)
+cond do
+  only = Keyword.get(opts, :only) ->
+    validate_fields!(only, fields, ":only")
+    only
+
+  except = Keyword.get(opts, :except) ->
+    validate_fields!(except, fields, ":except")
+    fields -- [:__struct__ | except]
+
+  true ->
+    fields -- [:__struct__]
+end
+```
+
+**cond for capability detection** — graceful degradation:
+
+```elixir
+cond do
+  Code.ensure_loaded?(FastModule) -> FastModule
+  Code.ensure_loaded?(FallbackModule) -> FallbackModule
+  true -> DefaultModule
+end
+```
+
+**cond for range/threshold branching:**
+
+```elixir
+# Format time values (from Credo)
+cond do
+  time > 1_000_000 -> "#{div(time, 1_000_000)}s"
+  time > 1_000 -> "#{div(time, 1_000)}ms"
+  true -> "#{time}μs"
+end
+```
+
+**When to use cond vs case vs multi-clause:**
+
+| Use | When |
+|-----|------|
+| `case` | Matching on ONE value's shape/pattern |
+| `cond` | Multiple DIFFERENT boolean expressions |
+| Multi-clause | Function dispatches on argument patterns |
+| `with` | Chaining operations that may fail |
+
+**cond is best for:** priority fallback chains, range/threshold checks, binding-in-condition patterns, and situations where each branch tests a completely different expression.
+
 ## The With Statement (extended)
 
 > Basic `with` pattern is in [SKILL.md](SKILL.md). This shows the full helper function pattern:
@@ -383,6 +431,165 @@ defmodule MyApp.Orders do
     end
   end
 end
+```
+
+## Imperative to Elixir Translation
+
+**Collection Operations:**
+
+| Imperative | Elixir |
+|---|---|
+| `for (x of list) result.push(f(x))` | `Enum.map(list, &f/1)` |
+| `for (x of list) if (p(x)) result.push(x)` | `Enum.filter(list, &p/1)` |
+| `let acc = init; for (...) acc = f(acc, x)` | `Enum.reduce(list, init, fn x, acc -> ... end)` |
+| `list.find(x => p(x))` | `Enum.find(list, &p/1)` |
+| `list.some(x => p(x))` | `Enum.any?(list, &p/1)` |
+| `list.flatMap(x => f(x))` | `Enum.flat_map(list, &f/1)` |
+| `[...set]` (deduplicate) | `Enum.uniq(list)` or `Enum.uniq_by(list, &key/1)` |
+| `list.sort((a,b) => a.name - b.name)` | `Enum.sort_by(list, & &1.name)` |
+| `Object.groupBy(list, x => x.type)` | `Enum.group_by(list, & &1.type)` |
+| `_.countBy(list, f)` | `Enum.frequencies_by(list, &f/1)` |
+| `_.chunk(list, 3)` | `Enum.chunk_every(list, 3)` |
+| `_.partition(list, pred)` | `Enum.split_with(list, &pred/1)` |
+| `list.join(", ")` | `Enum.join(list, ", ")` |
+| `Math.max(...list)` | `Enum.max(list)` |
+| `list.reduce((a, b) => a + b, 0)` | `Enum.sum(list)` |
+
+**Control Flow:**
+
+| Imperative | Elixir |
+|---|---|
+| `if/else if/else` | Multi-clause function with pattern matching |
+| `switch (x.type)` | `case x.type do ... end` or multi-clause function |
+| `if (x != null && x.active)` | `def f(%{active: true} = x)` (pattern match) |
+| `try { risky() } catch(e) { ... }` | `case risky() do {:ok, v} -> v; {:error, _} -> fallback end` |
+| `for (...) { if (done) break }` | `Enum.reduce_while(list, acc, fn x, acc -> {:cont/:halt, acc} end)` |
+| `while (cond) { ... }` | Recursive function with guard or `Stream.iterate/2` |
+| `early return` | Pattern match + multiple function clauses |
+
+**Data Mutation:**
+
+| Imperative | Elixir |
+|---|---|
+| `obj.key = value` | `%{map \| key: value}` or `Map.put(map, key, value)` |
+| `obj.a.b.c = value` | `put_in(obj, [:a, :b, :c], value)` |
+| `obj.count++` | `update_in(obj, [:count], & &1 + 1)` |
+| `delete obj.key` | `Map.delete(map, key)` |
+| `list.push(item)` | `[item \| list]` (prepend — O(1)) |
+| `list.pop()` | `[head \| tail] = list` (pattern match) |
+| `set.add(item)` | `MapSet.put(set, item)` |
+| `str += chunk` in loop | IO list: `[chunk \| acc]`, then `IO.iodata_to_binary/1` |
+| `"Hello " + name + "!"` | `"Hello #{name}!"` (interpolation) |
+| `result = ""; for (x) result += f(x)` | `Enum.map_join(items, ", ", &f/1)` |
+| `x ?? default` | `x \|\| default` (beware: also catches `false`) |
+| `x?.y?.z` | `get_in(x, [:y, :z])` |
+
+## Pipeline Best Practices (extended)
+
+> Core pipeline patterns are in [SKILL.md](SKILL.md). This section covers additional techniques.
+
+```elixir
+# Design functions data-first so they compose in pipelines
+defmodule StringHelpers do
+  def normalize(string) do
+    string |> String.trim() |> String.downcase() |> String.replace(~r/\s+/, " ")
+  end
+  def truncate(string, max) when byte_size(string) <= max, do: string
+  def truncate(string, max), do: String.slice(string, 0, max - 3) <> "..."
+end
+
+input |> StringHelpers.normalize() |> StringHelpers.truncate(100)
+
+# Break long pipelines into named private functions
+def process_orders(orders) do
+  orders
+  |> filter_valid()
+  |> calculate_totals()
+  |> apply_discounts()
+  |> generate_invoices()
+end
+
+defp filter_valid(orders), do: orders |> Enum.filter(&valid_order?/1) |> Enum.reject(&cancelled?/1)
+defp calculate_totals(orders), do: Enum.map(orders, &%{&1 | total: calculate_order_total(&1)})
+
+# Conditional steps — use maybe_ helpers to keep pipeline flat
+data
+|> transform()
+|> maybe_validate(opts[:validate])
+|> finalize()
+
+defp maybe_validate(data, true), do: validate(data)
+defp maybe_validate(data, _), do: data
+
+# Or with then/1 for inline conditionals
+data
+|> transform()
+|> then(fn d -> if opts[:validate], do: validate(d), else: d end)
+
+# ok/error pipeline — chain with pattern-matching helpers
+defp authorize(user, action) do
+  user
+  |> check_role(action)
+  |> check_permissions(action)
+  |> check_rate_limit()
+end
+
+defp check_role(%{role: :admin} = user, _action), do: {:ok, user}
+defp check_role(%{role: :user} = user, :read), do: {:ok, user}
+defp check_role(_, action), do: {:error, {:unauthorized, action}}
+
+defp check_permissions({:ok, user}, action), do: Permissions.verify(user, action)
+defp check_permissions(error, _action), do: error
+
+defp check_rate_limit({:ok, user}), do: RateLimiter.check(user)
+defp check_rate_limit(error), do: error
+```
+
+### tap/1 and then/1 — Pipeline Utilities
+
+```elixir
+# tap/1 — execute a side effect, returns the ORIGINAL value (not the tap result)
+order
+|> calculate_total()
+|> tap(&Logger.debug("Total: #{&1}"))  # Returns order total, not Logger's :ok
+|> apply_tax()
+
+# BAD: expecting tap to transform the value
+data |> tap(&String.upcase/1)  # Returns original data, NOT uppercased!
+
+# GOOD: use then/1 when you need the transformed value
+data |> then(&String.upcase/1)  # Returns uppercased data
+
+# then/1 — transform with a function (useful for non-pipeable APIs)
+user_id
+|> fetch_user()
+|> then(fn {:ok, user} -> send_email(user); {:error, _} = err -> err end)
+
+# then/1 for wrapping non-pipe-friendly calls
+config
+|> Map.get(:timeout, 5000)
+|> then(&Process.send_after(self(), :check, &1))
+```
+
+### dbg/2 — Pipeline Debugging (Elixir 1.14+)
+
+```elixir
+# dbg at the end of a pipeline shows each step with intermediate values
+[1, 2, 3]
+|> Enum.map(&(&1 * 2))
+|> Enum.filter(&(&1 > 2))
+|> dbg()
+# Output shows: [1, 2, 3] |> Enum.map(...) #=> [2, 4, 6] |> Enum.filter(...) #=> [4, 6]
+
+# dbg on any expression
+x = compute_value()
+dbg(x)  # Prints: x #=> <value> with file:line
+
+# Make dbg use IEx.pry for interactive debugging
+# iex --dbg pry -S mix
+
+# BAD: leaving dbg in production code — always remove after debugging
+# GOOD: use tap(&IO.inspect(&1, label: "...")) for permanent debug logging
 ```
 
 ## For Comprehensions (full)
@@ -554,92 +761,32 @@ end)
 &(&1)                           # Identity function
 ```
 
-## case and cond (full)
+## @enforce_keys — Struct Construction Safety
 
 ```elixir
-# case - pattern match on single value
-case fetch_user(id) do
-  {:ok, user} -> process(user)
-  {:error, :not_found} -> create_user(id)
-  {:error, reason} -> log_error(reason)
+defmodule MyApp.Config do
+  @enforce_keys [:name, :adapter]
+  defstruct [:name, :adapter, timeout: 5000, retries: 3]
+
+  @type t :: %__MODULE__{
+    name: atom(),
+    adapter: module(),
+    timeout: pos_integer(),
+    retries: non_neg_integer()
+  }
+
+  # Constructor validates and normalizes
+  def new(opts) when is_list(opts) do
+    struct!(__MODULE__, opts)  # Raises if @enforce_keys missing
+  end
 end
 
-# cond - multiple boolean conditions (no else if!)
-cond do
-  x > 10 -> :large
-  x > 5 -> :medium
-  x > 0 -> :small
-  true -> :zero_or_negative  # Always end with true ->
-end
+# struct!/2 raises ArgumentError on missing enforced keys
+MyApp.Config.new(name: :cache)  # ** (ArgumentError) the following keys must also be given: [:adapter]
+
+# BAD: using %MyApp.Config{} directly — bypasses enforcement in some contexts
+# GOOD: always use the new/1 constructor from outside the module
 ```
-
-**cond with variable binding** — assign in condition, use in body:
-
-```elixir
-# Priority-based config resolution (from Absinthe)
-cond do
-  executor = Keyword.get(opts, :executor) ->
-    executor
-
-  executor = get_in(opts, [:context, :streaming_executor]) ->
-    executor
-
-  schema && function_exported?(schema, :__streaming_executor__, 0) ->
-    schema.__streaming_executor__()
-
-  executor = Application.get_env(:my_app, :executor) ->
-    executor
-
-  true ->
-    DefaultExecutor
-end
-
-# Only/except option handling (from Jason encoder)
-cond do
-  only = Keyword.get(opts, :only) ->
-    validate_fields!(only, fields, ":only")
-    only
-
-  except = Keyword.get(opts, :except) ->
-    validate_fields!(except, fields, ":except")
-    fields -- [:__struct__ | except]
-
-  true ->
-    fields -- [:__struct__]
-end
-```
-
-**cond for capability detection** — graceful degradation:
-
-```elixir
-cond do
-  Code.ensure_loaded?(FastModule) -> FastModule
-  Code.ensure_loaded?(FallbackModule) -> FallbackModule
-  true -> DefaultModule
-end
-```
-
-**cond for range/threshold branching:**
-
-```elixir
-# Format time values (from Credo)
-cond do
-  time > 1_000_000 -> "#{div(time, 1_000_000)}s"
-  time > 1_000 -> "#{div(time, 1_000)}ms"
-  true -> "#{time}μs"
-end
-```
-
-**When to use cond vs case vs multi-clause:**
-
-| Use | When |
-|-----|------|
-| `case` | Matching on ONE value's shape/pattern |
-| `cond` | Multiple DIFFERENT boolean expressions |
-| Multi-clause | Function dispatches on argument patterns |
-| `with` | Chaining operations that may fail |
-
-**cond is best for:** priority fallback chains, range/threshold checks, binding-in-condition patterns, and situations where each branch tests a completely different expression.
 
 ## Behaviours, Callbacks & @impl
 
@@ -921,88 +1068,6 @@ end
 - Design your `Enum.reduce` to consume reversed lists (Plug.Builder approach)
 - Call `Enum.reverse()` explicitly when order matters (Phoenix.Socket approach)
 
-### Behaviour for Swappable Storage Backends
-
-Define a behaviour to allow different storage implementations:
-
-```elixir
-defmodule MyApp.ConfigStorage do
-  @moduledoc "Behaviour for configuration storage backends"
-
-  @callback setup() :: :ok
-  @callback put(key :: atom, value :: term) :: :ok
-  @callback get(key :: atom) :: term | nil
-  @callback delete(key :: atom) :: :ok
-  @callback list() :: [atom]
-
-  @optional_callbacks setup: 0
-
-  # Dynamic backend selection
-  def get_module do
-    case Application.get_env(:my_app, :config_storage, :persistent_term) do
-      :ets -> MyApp.ConfigStorage.ETS
-      :persistent_term -> MyApp.ConfigStorage.PersistentTerm
-      module when is_atom(module) -> module
-    end
-  end
-end
-
-defmodule MyApp.ConfigStorage.PersistentTerm do
-  @behaviour MyApp.ConfigStorage
-
-  @impl true
-  def put(key, value) do
-    :persistent_term.put({__MODULE__, key}, value)
-  end
-
-  @impl true
-  def get(key) do
-    :persistent_term.get({__MODULE__, key}, nil)
-  end
-
-  @impl true
-  def delete(_key) do
-    # Intentionally no-op: persistent_term deletion is expensive
-    :ok
-  end
-
-  @impl true
-  def list do
-    :persistent_term.get()
-    |> Enum.filter(fn {{mod, _}, _} -> mod == __MODULE__; _ -> false end)
-    |> Enum.map(fn {{_, key}, _} -> key end)
-  end
-end
-
-defmodule MyApp.ConfigStorage.ETS do
-  @behaviour MyApp.ConfigStorage
-  @table __MODULE__
-
-  @impl true
-  def setup do
-    :ets.new(@table, [:named_table, :public, read_concurrency: true])
-    :ok
-  end
-
-  @impl true
-  def put(key, value), do: :ets.insert(@table, {key, value}) && :ok
-
-  @impl true
-  def get(key) do
-    case :ets.lookup(@table, key) do
-      [{^key, value}] -> value
-      [] -> nil
-    end
-  end
-
-  @impl true
-  def delete(key), do: :ets.delete(@table, key) && :ok
-
-  @impl true
-  def list, do: :ets.tab2list(@table) |> Enum.map(&elem(&1, 0))
-end
-```
-
 ## Protocols
 
 ### Rules for Protocols (LLM)
@@ -1203,22 +1268,6 @@ Enumerable.List.__impl__(:for)      #=> List
     end
   end
   ```
-
-### Application.compile_env vs Runtime Config
-
-```elixir
-# compile_env — value affects CODE GENERATION (conditional compilation)
-# Used when the value determines what code is compiled
-debug_errors? = Application.compile_env(:my_app, [MyEndpoint, :debug_errors], false)
-if debug_errors?, do: plug Plug.Debugger  # Plug is included/excluded at compile time
-
-# Runtime config — for operational values that can change between deploys
-# Port, host, secret_key_base, database URL, etc.
-config = Application.get_env(:my_app, MyEndpoint)
-port = config[:port] || 4000
-```
-
-**Rule:** Use `compile_env` only when the value determines what code is generated. Use runtime config for everything else. `compile_env` triggers recompilation when the value changes.
 
 ## Stream & Enumerable Protocol
 
@@ -1474,6 +1523,8 @@ for x <- 1..5, into: CircularBuffer.new(5), do: x
 
 ## Error Handling
 
+> Core error handling rules (ok/error tuples, no try/rescue for control flow, let it crash) are in [SKILL.md](SKILL.md). This section covers defexception patterns, error kernel design, exit reasons, and the Result module pattern.
+
 ### defexception Patterns
 
 ```elixir
@@ -1634,7 +1685,14 @@ fetch_user(id)
 |> Result.unwrap_or(%{})
 ```
 
-## Advanced Patterns (Req, Broadway, Absinthe patterns)
+## Advanced Patterns (General-Purpose)
+
+> Domain-specific patterns have been moved to their natural homes:
+> - Telemetry patterns → [production.md](production.md)
+> - Plug halt semantics → [production.md](production.md)
+> - Changeset semantics → [ecto-reference.md](ecto-reference.md)
+> - GenStage/Broadway patterns (Subscriber, CallerAcknowledger, Coordinated Shutdown, Message/Acknowledger, BatchInfo) → [otp-advanced.md](otp-advanced.md)
+> - Dynamic Pool → [otp-examples.md](otp-examples.md)
 
 ### Bidirectional Step Pipeline
 
@@ -1820,113 +1878,6 @@ end
   |> Enum.into(collect_with_hash([], :sha256))
 ```
 
-### CallerAcknowledger for Testing Async Flows
-
-Test acknowledgment-based systems by sending messages back to test process:
-
-```elixir
-defmodule CallerAcknowledger do
-  @behaviour MyApp.Acknowledger
-
-  def init({pid, ref}, _data) when is_pid(pid) do
-    {__MODULE__, {pid, ref}, nil}
-  end
-
-  @impl true
-  def ack({pid, ref}, successful, failed) do
-    send(pid, {:ack, ref, successful, failed})
-  end
-end
-
-# In test
-test "processes and acknowledges messages" do
-  ref = make_ref()
-  ack = CallerAcknowledger.init({self(), ref}, nil)
-
-  MyApp.Pipeline.push_message(%Message{data: "test", acknowledger: ack})
-
-  assert_receive {:ack, ^ref, [%{data: "test"}], []}, 5000
-end
-```
-
-### Coordinated Shutdown (Terminator Pattern)
-
-Three-phase shutdown to prevent message loss:
-
-```elixir
-defmodule Terminator do
-  use GenServer
-
-  def handle_info(:terminate, state) do
-    # Phase 1: Signal consumers to stop accepting new work
-    for name <- state.consumers do
-      if pid = GenServer.whereis(name), do: send(pid, :will_terminate)
-    end
-
-    # Phase 2: Drain producer buffers
-    for name <- state.producers do
-      if pid = GenServer.whereis(name), do: Producer.drain(pid)
-    end
-
-    # Phase 3: Wait for completion with monitoring
-    refs = Enum.map(state.producers, &Process.monitor(GenServer.whereis(&1)))
-    await_completion(refs)
-
-    {:stop, :normal, state}
-  end
-end
-```
-
-### Telemetry Integration
-
-The `:telemetry` library is the standard for instrumentation in Elixir. Two patterns:
-
-```elixir
-# Pattern 1: :telemetry.span — wraps an operation with start/stop/exception events
-# The callback MUST return {result, metadata} tuple
-:telemetry.span([:my_app, :repo, :query], %{source: table}, fn ->
-  result = execute_query(query)
-  {result, %{source: table, result: result}}  # {return_value, stop_metadata}
-end)
-
-# Pattern 2: Manual start/stop — when you need more control
-start = System.monotonic_time()
-:telemetry.execute([:my_app, :request, :start], %{system_time: System.system_time()}, metadata)
-
-try do
-  result = do_work()
-  duration = System.monotonic_time() - start
-  :telemetry.execute([:my_app, :request, :stop], %{duration: duration}, metadata)
-  result
-rescue
-  e ->
-    duration = System.monotonic_time() - start
-    :telemetry.execute([:my_app, :request, :exception], %{duration: duration}, metadata)
-    reraise e, __STACKTRACE__
-end
-```
-
-**Naming convention:** `[:app, :component, :action]` — action is `:start`/`:stop`/`:exception`. Measurements always include `%{duration: ...}` for stop/exception, `%{system_time: ...}` for start.
-
-### Plug halt/1 Semantics
-
-`halt/1` sets a flag — it does NOT stop execution of the current plug:
-
-```elixir
-# halt/1 just sets halted: true on the conn
-def halt(%Conn{} = conn), do: %{conn | halted: true}
-
-# The compiled pipeline checks the flag BETWEEN plugs, not during
-# Your plug must still return the conn after halting
-def call(conn, _opts) do
-  conn
-  |> put_status(403)
-  |> send_resp(403, "Forbidden")
-  |> halt()   # Sets flag; subsequent plugs in pipeline are skipped
-  # Code AFTER halt() in this function still executes!
-end
-```
-
 ### Task.async_stream Patterns
 
 ```elixir
@@ -1983,34 +1934,6 @@ defp walk({:@, _, [{:spec, _, args}]} = node, issues) do
     {_ast, structs} -> {node, [build_issue(structs) | issues]}
   end
 end
-```
-
-### Changeset Semantics — Validations vs Constraints
-
-Changesets are **eagerly evaluated data structures**, not lazy. Each function in the pipeline executes immediately and returns a new `%Changeset{}`:
-
-```elixir
-user
-|> cast(params, [:email, :name])           # Executes NOW — casts and filters params
-|> validate_required([:email])             # Executes NOW — checks presence, adds error
-|> validate_format(:email, ~r/@/)          # Executes NOW — checks format
-|> unique_constraint(:email)               # DEFERRED — just registers a constraint handler
-|> Repo.insert()                           # DB hit; if unique index fails, constraint fires
-```
-
-**Critical distinctions:**
-- **Validations** (`validate_*`) run immediately when called. If any fail, `valid?` is `false`
-- **Constraints** (`*_constraint`) are deferred — they register handlers that fire ONLY if the DB returns an error
-- If `valid?` is `false`, Repo never hits the DB — constraints never execute
-- `unique_constraint` is NOT a validation — it's a post-insert DB check that converts a DB error into a changeset error
-
-**Ecto.Multi** validates static changesets BEFORE starting the transaction:
-```elixir
-Multi.new()
-|> Multi.insert(:user, invalid_changeset)   # valid?: false
-|> Repo.transaction()                        # Returns {:error, :user, changeset, %{}}
-# Transaction never started — the invalid changeset was caught pre-transaction
-# But function-based operations skip this check (changeset doesn't exist yet)
 ```
 
 ### Phase Pipeline Pattern
@@ -2137,247 +2060,5 @@ defmodule MyApp.Backoff do
         end
     end
   end
-end
-```
-
-### Message with Acknowledger Pattern (from Broadway)
-
-Decouple message processing from acknowledgment strategy:
-
-```elixir
-defmodule MyApp.Message do
-  @enforce_keys [:data, :acknowledger]
-  defstruct [
-    :data,
-    :metadata,
-    :acknowledger,  # {module, ack_ref, ack_data}
-    status: :ok,
-    batcher: :default
-  ]
-
-  @type acknowledger :: {module, ack_ref :: term, ack_data :: term}
-
-  def ack_immediately(%__MODULE__{} = message) do
-    {module, ack_ref, ack_data} = message.acknowledger
-    module.ack(ack_ref, [message], [])
-    %{message | acknowledger: MyApp.NoopAcknowledger.init()}
-  end
-
-  def failed(%__MODULE__{} = message, reason) do
-    %{message | status: {:failed, reason}}
-  end
-end
-
-defmodule MyApp.Acknowledger do
-  @callback ack(ack_ref :: term, successful :: [Message.t()], failed :: [Message.t()]) :: :ok
-  @callback configure(ack_ref :: term, ack_data :: term, opts :: keyword) :: {:ok, ack_data}
-  @optional_callbacks configure: 3
-end
-
-defmodule MyApp.NoopAcknowledger do
-  @behaviour MyApp.Acknowledger
-
-  def init, do: {__MODULE__, nil, nil}
-
-  @impl true
-  def ack(_ref, _successful, _failed), do: :ok
-end
-
-defmodule MyApp.SQSAcknowledger do
-  @behaviour MyApp.Acknowledger
-
-  def init(queue_url, receipt_handle) do
-    {__MODULE__, queue_url, receipt_handle}
-  end
-
-  @impl true
-  def ack(queue_url, successful, _failed) do
-    entries = Enum.map(successful, fn msg ->
-      {_, _, receipt_handle} = msg.acknowledger
-      %{id: msg.metadata.id, receipt_handle: receipt_handle}
-    end)
-
-    ExAws.SQS.delete_message_batch(queue_url, entries)
-    |> ExAws.request()
-
-    :ok
-  end
-end
-```
-
-### Subscriber Resubscription Pattern
-
-Auto-reconnect to producers after transient failures:
-
-```elixir
-defmodule MyApp.Subscriber do
-  use GenStage
-
-  def start_link(opts) do
-    GenStage.start_link(__MODULE__, opts)
-  end
-
-  @impl true
-  def init(opts) do
-    producers = Keyword.fetch!(opts, :producers)
-    resubscribe_delay = Keyword.get(opts, :resubscribe_delay, 1000)
-
-    state = %{
-      producers: producers,
-      resubscribe_delay: resubscribe_delay,
-      subscriptions: %{}
-    }
-
-    # Subscribe to all producers
-    {:consumer, state, subscribe_to: producers}
-  end
-
-  @impl true
-  def handle_subscribe(:producer, _opts, {pid, _ref} = from, state) do
-    subscriptions = Map.put(state.subscriptions, pid, from)
-    {:automatic, %{state | subscriptions: subscriptions}}
-  end
-
-  @impl true
-  def handle_cancel({:down, _reason}, {pid, _ref}, state) do
-    # Producer crashed - schedule resubscription
-    Process.send_after(self(), {:resubscribe, pid}, state.resubscribe_delay)
-    subscriptions = Map.delete(state.subscriptions, pid)
-    {:noreply, [], %{state | subscriptions: subscriptions}}
-  end
-
-  def handle_cancel(_reason, {pid, _ref}, state) do
-    # Normal cancellation - don't resubscribe
-    subscriptions = Map.delete(state.subscriptions, pid)
-    {:noreply, [], %{state | subscriptions: subscriptions}}
-  end
-
-  @impl true
-  def handle_info({:resubscribe, producer}, state) do
-    case GenStage.sync_subscribe(self(), to: producer) do
-      {:ok, _ref} ->
-        {:noreply, [], state}
-      {:error, _reason} ->
-        # Retry with backoff
-        Process.send_after(self(), {:resubscribe, producer}, state.resubscribe_delay * 2)
-        {:noreply, [], state}
-    end
-  end
-
-  @impl true
-  def handle_events(events, _from, state) do
-    # Process events
-    Enum.each(events, &process_event/1)
-    {:noreply, [], state}
-  end
-
-  defp process_event(event), do: IO.inspect(event, label: "Event")
-end
-```
-
-### Dynamic Pool Creation with Deduplication
-
-Create connection pools on-demand with MD5 hash deduplication:
-
-```elixir
-defmodule MyApp.PoolManager do
-  @moduledoc """
-  Creates connection pools dynamically based on options.
-  Same options = same pool (deduplicated via MD5 hash).
-  """
-
-  def get_or_create_pool(options) do
-    # Generate unique pool name from options hash
-    key = :erlang.md5(:erlang.term_to_binary(options))
-    name = Module.concat(__MODULE__, "Pool_" <> Base.encode16(key, case: :lower))
-
-    case DynamicSupervisor.start_child(
-      MyApp.PoolSupervisor,
-      {NimblePool, worker: {MyApp.PoolWorker, options}, name: name}
-    ) do
-      {:ok, _pid} -> name
-      {:error, {:already_started, _pid}} -> name  # Deduplication: reuse existing
-    end
-  end
-end
-
-# In Application supervisor
-children = [
-  {DynamicSupervisor, strategy: :one_for_one, name: MyApp.PoolSupervisor}
-]
-```
-
-### Batch Info with Trigger Metadata
-
-Include why a batch was triggered for context-aware handling:
-
-```elixir
-defmodule MyApp.BatchInfo do
-  @type t :: %__MODULE__{
-    batcher: atom,
-    batch_key: term,
-    partition: non_neg_integer | nil,
-    size: pos_integer,
-    trigger: :size | :timeout | :flush
-  }
-
-  defstruct [:batcher, :batch_key, :partition, :size, :trigger]
-end
-
-defmodule MyApp.BatchHandler do
-  def handle_batch(batcher, messages, batch_info, state) do
-    case batch_info.trigger do
-      :timeout ->
-        # Partial batch due to timeout - might want different handling
-        Logger.info("Processing partial batch of #{batch_info.size} (timeout)")
-        process_messages(messages, async: false)
-
-      :size ->
-        # Full batch - can process more aggressively
-        Logger.info("Processing full batch of #{batch_info.size}")
-        process_messages(messages, async: true)
-
-      :flush ->
-        # Urgent flush - process immediately
-        Logger.info("Flush-triggered batch of #{batch_info.size}")
-        process_messages(messages, async: false, priority: :high)
-    end
-
-    {:ok, messages, state}
-  end
-end
-```
-
-### Telemetry Integration Pattern (extended)
-
-```elixir
-defmodule MyApp.Telemetry do
-  def with_span(event_prefix, meta, fun) do
-    start_time = System.monotonic_time()
-    start_meta = Map.put(meta, :system_time, System.system_time())
-    :telemetry.execute(event_prefix ++ [:start], %{system_time: start_meta.system_time}, start_meta)
-
-    try do
-      result = fun.()
-      duration = System.monotonic_time() - start_time
-      :telemetry.execute(event_prefix ++ [:stop], %{duration: duration}, Map.put(meta, :result, result))
-      result
-    rescue
-      exception ->
-        duration = System.monotonic_time() - start_time
-        :telemetry.execute(event_prefix ++ [:exception], %{duration: duration},
-          Map.merge(meta, %{kind: :error, reason: exception, stacktrace: __STACKTRACE__}))
-        reraise exception, __STACKTRACE__
-    end
-  end
-
-  def attach_default_logger(opts \\ []) do
-    events = [[:my_app, :job, :start], [:my_app, :job, :stop], [:my_app, :job, :exception]]
-    :telemetry.attach_many("my-app-logger", events, &handle_event/4, opts)
-  end
-
-  defp handle_event([:my_app, :job, :start], _, meta, _), do: Logger.info("[Job] Starting #{meta.worker}")
-  defp handle_event([:my_app, :job, :stop], m, meta, _), do: Logger.info("[Job] Completed #{meta.worker} in #{div(m.duration, 1_000_000)}ms")
-  defp handle_event([:my_app, :job, :exception], _, meta, _), do: Logger.error("[Job] Failed #{meta.worker}: #{inspect(meta.reason)}")
 end
 ```

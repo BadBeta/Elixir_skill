@@ -389,3 +389,31 @@ Ecto emits `[:my_app, :repo, :query]` for every query with these measurements (a
 | `:total_time` | queue + query + decode |
 
 Metadata: `:repo`, `:query` (SQL string), `:source` (table), `:params`, `:result`, `:stacktrace` (if enabled).
+
+## Changeset Semantics — Validations vs Constraints
+
+Changesets are **eagerly evaluated data structures**, not lazy. Each function in the pipeline executes immediately and returns a new `%Changeset{}`:
+
+```elixir
+user
+|> cast(params, [:email, :name])           # Executes NOW — casts and filters params
+|> validate_required([:email])             # Executes NOW — checks presence, adds error
+|> validate_format(:email, ~r/@/)          # Executes NOW — checks format
+|> unique_constraint(:email)               # DEFERRED — just registers a constraint handler
+|> Repo.insert()                           # DB hit; if unique index fails, constraint fires
+```
+
+**Critical distinctions:**
+- **Validations** (`validate_*`) run immediately when called. If any fail, `valid?` is `false`
+- **Constraints** (`*_constraint`) are deferred — they register handlers that fire ONLY if the DB returns an error
+- If `valid?` is `false`, Repo never hits the DB — constraints never execute
+- `unique_constraint` is NOT a validation — it's a post-insert DB check that converts a DB error into a changeset error
+
+**Ecto.Multi** validates static changesets BEFORE starting the transaction:
+```elixir
+Multi.new()
+|> Multi.insert(:user, invalid_changeset)   # valid?: false
+|> Repo.transaction()                        # Returns {:error, :user, changeset, %{}}
+# Transaction never started — the invalid changeset was caught pre-transaction
+# But function-based operations skip this check (changeset doesn't exist yet)
+```

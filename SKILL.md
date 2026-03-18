@@ -16,7 +16,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 |------|----------|
 | [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction |
 | [quick-references.md](quick-references.md) | Enum, Map, Keyword, List, String, Regex, File/Path, URI, Date/Time, IO, Access, Process, Range, Agent quick refs, Erlang stdlib (21 modules), JSON |
-| [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, comprehensions, pipelines, behaviours, protocols, streams, error handling, advanced patterns |
+| [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, comprehensions, function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, advanced patterns (pipeline, option registration, AST traversal, backoff) |
 | [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, readable code patterns (pipelines, guards, naming, conditionals), BAD/GOOD pairs |
 | [documentation.md](documentation.md) | @moduledoc/@doc patterns, @spec/@type/@typedoc, @since/@deprecated, doctests (multi-line, exceptions, ellipsis), ExDoc config, cross-references |
 | [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), notation, atoms/tuples/maps/functions as types, dynamic(), inference, compiler warnings, @spec vs gradual types, roadmap |

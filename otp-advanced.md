@@ -626,3 +626,235 @@ end
 |> Enum.sort_by(& &1.memory_bytes, :desc)
 |> Enum.take(10)
 ```
+
+## Subscriber Resubscription Pattern
+
+Auto-reconnect to producers after transient failures:
+
+```elixir
+defmodule MyApp.Subscriber do
+  use GenStage
+
+  def start_link(opts) do
+    GenStage.start_link(__MODULE__, opts)
+  end
+
+  @impl true
+  def init(opts) do
+    producers = Keyword.fetch!(opts, :producers)
+    resubscribe_delay = Keyword.get(opts, :resubscribe_delay, 1000)
+
+    state = %{
+      producers: producers,
+      resubscribe_delay: resubscribe_delay,
+      subscriptions: %{}
+    }
+
+    # Subscribe to all producers
+    {:consumer, state, subscribe_to: producers}
+  end
+
+  @impl true
+  def handle_subscribe(:producer, _opts, {pid, _ref} = from, state) do
+    subscriptions = Map.put(state.subscriptions, pid, from)
+    {:automatic, %{state | subscriptions: subscriptions}}
+  end
+
+  @impl true
+  def handle_cancel({:down, _reason}, {pid, _ref}, state) do
+    # Producer crashed - schedule resubscription
+    Process.send_after(self(), {:resubscribe, pid}, state.resubscribe_delay)
+    subscriptions = Map.delete(state.subscriptions, pid)
+    {:noreply, [], %{state | subscriptions: subscriptions}}
+  end
+
+  def handle_cancel(_reason, {pid, _ref}, state) do
+    # Normal cancellation - don't resubscribe
+    subscriptions = Map.delete(state.subscriptions, pid)
+    {:noreply, [], %{state | subscriptions: subscriptions}}
+  end
+
+  @impl true
+  def handle_info({:resubscribe, producer}, state) do
+    case GenStage.sync_subscribe(self(), to: producer) do
+      {:ok, _ref} ->
+        {:noreply, [], state}
+      {:error, _reason} ->
+        # Retry with backoff
+        Process.send_after(self(), {:resubscribe, producer}, state.resubscribe_delay * 2)
+        {:noreply, [], state}
+    end
+  end
+
+  @impl true
+  def handle_events(events, _from, state) do
+    Enum.each(events, &process_event/1)
+    {:noreply, [], state}
+  end
+
+  defp process_event(event), do: IO.inspect(event, label: "Event")
+end
+```
+
+## Coordinated Shutdown (Terminator Pattern)
+
+Three-phase shutdown to prevent message loss:
+
+```elixir
+defmodule Terminator do
+  use GenServer
+
+  def handle_info(:terminate, state) do
+    # Phase 1: Signal consumers to stop accepting new work
+    for name <- state.consumers do
+      if pid = GenServer.whereis(name), do: send(pid, :will_terminate)
+    end
+
+    # Phase 2: Drain producer buffers
+    for name <- state.producers do
+      if pid = GenServer.whereis(name), do: Producer.drain(pid)
+    end
+
+    # Phase 3: Wait for completion with monitoring
+    refs = Enum.map(state.producers, &Process.monitor(GenServer.whereis(&1)))
+    await_completion(refs)
+
+    {:stop, :normal, state}
+  end
+end
+```
+
+## CallerAcknowledger for Testing Async Flows
+
+Test acknowledgment-based systems by sending messages back to test process:
+
+```elixir
+defmodule CallerAcknowledger do
+  @behaviour MyApp.Acknowledger
+
+  def init({pid, ref}, _data) when is_pid(pid) do
+    {__MODULE__, {pid, ref}, nil}
+  end
+
+  @impl true
+  def ack({pid, ref}, successful, failed) do
+    send(pid, {:ack, ref, successful, failed})
+  end
+end
+
+# In test
+test "processes and acknowledges messages" do
+  ref = make_ref()
+  ack = CallerAcknowledger.init({self(), ref}, nil)
+
+  MyApp.Pipeline.push_message(%Message{data: "test", acknowledger: ack})
+
+  assert_receive {:ack, ^ref, [%{data: "test"}], []}, 5000
+end
+```
+
+## Message with Acknowledger Pattern (from Broadway)
+
+Decouple message processing from acknowledgment strategy:
+
+```elixir
+defmodule MyApp.Message do
+  @enforce_keys [:data, :acknowledger]
+  defstruct [
+    :data,
+    :metadata,
+    :acknowledger,  # {module, ack_ref, ack_data}
+    status: :ok,
+    batcher: :default
+  ]
+
+  @type acknowledger :: {module, ack_ref :: term, ack_data :: term}
+
+  def ack_immediately(%__MODULE__{} = message) do
+    {module, ack_ref, ack_data} = message.acknowledger
+    module.ack(ack_ref, [message], [])
+    %{message | acknowledger: MyApp.NoopAcknowledger.init()}
+  end
+
+  def failed(%__MODULE__{} = message, reason) do
+    %{message | status: {:failed, reason}}
+  end
+end
+
+defmodule MyApp.Acknowledger do
+  @callback ack(ack_ref :: term, successful :: [Message.t()], failed :: [Message.t()]) :: :ok
+  @callback configure(ack_ref :: term, ack_data :: term, opts :: keyword) :: {:ok, ack_data}
+  @optional_callbacks configure: 3
+end
+
+defmodule MyApp.NoopAcknowledger do
+  @behaviour MyApp.Acknowledger
+
+  def init, do: {__MODULE__, nil, nil}
+
+  @impl true
+  def ack(_ref, _successful, _failed), do: :ok
+end
+
+defmodule MyApp.SQSAcknowledger do
+  @behaviour MyApp.Acknowledger
+
+  def init(queue_url, receipt_handle) do
+    {__MODULE__, queue_url, receipt_handle}
+  end
+
+  @impl true
+  def ack(queue_url, successful, _failed) do
+    entries = Enum.map(successful, fn msg ->
+      {_, _, receipt_handle} = msg.acknowledger
+      %{id: msg.metadata.id, receipt_handle: receipt_handle}
+    end)
+
+    ExAws.SQS.delete_message_batch(queue_url, entries)
+    |> ExAws.request()
+
+    :ok
+  end
+end
+```
+
+## Batch Info with Trigger Metadata
+
+Include why a batch was triggered for context-aware handling:
+
+```elixir
+defmodule MyApp.BatchInfo do
+  @type t :: %__MODULE__{
+    batcher: atom,
+    batch_key: term,
+    partition: non_neg_integer | nil,
+    size: pos_integer,
+    trigger: :size | :timeout | :flush
+  }
+
+  defstruct [:batcher, :batch_key, :partition, :size, :trigger]
+end
+
+defmodule MyApp.BatchHandler do
+  def handle_batch(batcher, messages, batch_info, state) do
+    case batch_info.trigger do
+      :timeout ->
+        # Partial batch due to timeout - might want different handling
+        Logger.info("Processing partial batch of #{batch_info.size} (timeout)")
+        process_messages(messages, async: false)
+
+      :size ->
+        # Full batch - can process more aggressively
+        Logger.info("Processing full batch of #{batch_info.size}")
+        process_messages(messages, async: true)
+
+      :flush ->
+        # Urgent flush - process immediately
+        Logger.info("Flush-triggered batch of #{batch_info.size}")
+        process_messages(messages, async: false, priority: :high)
+    end
+
+    {:ok, messages, state}
+  end
+end
+```

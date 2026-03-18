@@ -2897,3 +2897,35 @@ defmodule MyApp.DistributedExecutor do
   end
 end
 ```
+
+## Dynamic Pool Creation with Deduplication
+
+Create connection pools on-demand with MD5 hash deduplication:
+
+```elixir
+defmodule MyApp.PoolManager do
+  @moduledoc """
+  Creates connection pools dynamically based on options.
+  Same options = same pool (deduplicated via MD5 hash).
+  """
+
+  def get_or_create_pool(options) do
+    # Generate unique pool name from options hash
+    key = :erlang.md5(:erlang.term_to_binary(options))
+    name = Module.concat(__MODULE__, "Pool_" <> Base.encode16(key, case: :lower))
+
+    case DynamicSupervisor.start_child(
+      MyApp.PoolSupervisor,
+      {NimblePool, worker: {MyApp.PoolWorker, options}, name: name}
+    ) do
+      {:ok, _pid} -> name
+      {:error, {:already_started, _pid}} -> name  # Deduplication: reuse existing
+    end
+  end
+end
+
+# In Application supervisor
+children = [
+  {DynamicSupervisor, strategy: :one_for_one, name: MyApp.PoolSupervisor}
+]
+```

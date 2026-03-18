@@ -539,6 +539,35 @@ System.get_env("PORT", "4000")                          # returns default
 
 **When to use `compile_env` vs `fetch_env!`:** Use `compile_env` when the value must be known at compile time (module attributes, macro expansion, `@gateway` in module body). Use `fetch_env!` for everything else — it reads the current value at runtime, respecting `runtime.exs` changes without recompilation.
 
+### Application.compile_env — Conditional Compilation
+
+`compile_env` is for values that affect **code generation** — what code gets compiled, not just what values are used at runtime:
+
+```elixir
+# compile_env — value affects CODE GENERATION (conditional compilation)
+# Used when the value determines what code is compiled
+debug_errors? = Application.compile_env(:my_app, [MyEndpoint, :debug_errors], false)
+if debug_errors?, do: plug Plug.Debugger  # Plug is included/excluded at compile time
+
+# Runtime config — for operational values that can change between deploys
+# Port, host, secret_key_base, database URL, etc.
+config = Application.get_env(:my_app, MyEndpoint)
+port = config[:port] || 4000
+```
+
+**Rule:** Use `compile_env` only when the value determines what code is generated. Use runtime config for everything else. `compile_env` triggers recompilation when the value changes — the compiler tracks which modules use it and automatically recompiles them.
+
+**Protocol consolidation interaction:** Protocol implementations are consolidated at compile time. If you conditionally define `defimpl` blocks using `compile_env`, the implementation is baked into the consolidated protocol. Changing the config requires recompilation:
+
+```elixir
+# This defimpl is included/excluded at compile time
+if Application.compile_env(:my_app, :enable_custom_inspect, false) do
+  defimpl Inspect, for: MyApp.Secret do
+    def inspect(_secret, _opts), do: "#MyApp.Secret<redacted>"
+  end
+end
+```
+
 ## Project Layouts
 
 ### Single Application (Default — Start Here)
