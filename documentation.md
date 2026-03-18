@@ -112,6 +112,20 @@ def __struct__, do: %__MODULE__{}
 @deprecated "Use Enum.chunk_every/2 instead"
 def chunk(enumerable, count), do: chunk_every(enumerable, count)
 
+# @impl true — inherits @doc from the behaviour callback definition
+# Do NOT add a redundant @doc when @impl true is sufficient
+@impl true
+def handle_call(:get_state, _from, state) do
+  {:reply, state, state}
+end
+
+# @impl true WITH custom @doc — overrides the behaviour's doc
+@impl true
+@doc "Returns the cached state, refreshing if older than TTL."
+def handle_call(:get_state, _from, state) do
+  {:reply, maybe_refresh(state), state}
+end
+
 # Delegate documentation (from Map)
 @doc """
 Builds a map from the given `keys` and the fixed `value`.
@@ -125,6 +139,19 @@ Builds a map from the given `keys` and the fixed `value`.
 @doc since: "1.14.0"
 @spec from_keys([key], value) :: map
 defdelegate from_keys(keys, value), to: :maps
+
+# @doc group: for organizing functions in ExDoc sidebar
+@doc group: "Query"
+@doc """
+Lists users matching the given filters.
+"""
+def list_users(filters \\ []), do: ...
+
+@doc group: "Mutation"
+@doc """
+Creates a new user account.
+"""
+def create_user(attrs), do: ...
 ```
 
 ### @spec — Typespecs
@@ -340,6 +367,68 @@ If a doctest line has no expected output, it just asserts no exception is raised
 ```
 
 Use `...` for non-deterministic parts of exception messages.
+
+#### ~S Sigil for Doctests with Special Characters
+
+Use `~S"""` instead of `"""` when your doctest contains `#{}` interpolation or backslash escapes that should be literal:
+
+```elixir
+# BAD: interpolation executes at compile time, not in doctest
+@doc """
+## Examples
+
+    iex> "Hello #{name}"   # This interpolates at compile time!
+"""
+
+# GOOD: ~S prevents interpolation — shows literal #{} in doctest
+@doc ~S"""
+Builds a greeting string.
+
+## Examples
+
+    iex> name = "World"
+    iex> "Hello #{name}"
+    "Hello World"
+
+"""
+def greet(name), do: "Hello #{name}"
+
+# Also useful for regex and escape sequences in doctests
+@doc ~S"""
+## Examples
+
+    iex> String.replace("a\nb", ~r/\n/, " ")
+    "a b"
+
+"""
+```
+
+**Rule:** Use `~S"""` whenever your doctest contains `#{}`, `\n`, `\t`, or other escape sequences that should appear literally in the example.
+
+#### Doctest Gotchas
+
+```elixir
+# GOTCHA 1: Map key ordering — maps don't guarantee order
+# BAD: may fail if keys print in different order
+    iex> Map.merge(%{a: 1}, %{b: 2, c: 3})
+    %{a: 1, b: 2, c: 3}
+# GOOD: works because Elixir sorts small map keys in inspect output
+# (Safe for maps with ≤32 keys — Elixir sorts them deterministically)
+
+# GOTCHA 2: Binding leaks between consecutive iex> lines
+    iex> x = 1       # x is bound
+    iex> x + 1        # x is still bound (same doctest block)
+    2
+# Separate blocks (blank line between) get independent bindings
+
+# GOTCHA 3: Modules defined in doctests persist for the whole test suite
+# NEVER define modules in doctests — use unit tests instead
+
+# GOTCHA 4: Doctest output comparison is string-based
+# The expected output must match inspect() output exactly
+    iex> Decimal.new("3.14")
+    #Decimal<3.14>           # Must match inspect output format
+```
 
 #### Running Doctests
 
@@ -561,4 +650,12 @@ defmodule MyApp.Accounts.Helpers do
   # ...
 end
 ```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — Core documentation rules (10 rules), key @doc/@spec pattern, common @spec patterns, deep-dive link
+- **[type-system.md](type-system.md)** — Set-theoretic types (1.17+), @spec notation, type inference, compiler warnings, gradual typing
+- **[testing-reference.md](testing-reference.md)** — Doctest-driven development pattern, ExUnit doctest options
+- **[language-patterns.md](language-patterns.md)** — Behaviours (@callback docs), protocols (@impl interaction), @enforce_keys
+- **[code-style.md](code-style.md)** — Credo documentation checks, formatter interaction with @doc strings
 

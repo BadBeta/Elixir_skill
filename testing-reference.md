@@ -549,6 +549,8 @@ mix test --max-failures 1
 
 ### Doctest-Driven Development
 
+> **Full doctest reference:** [documentation.md](documentation.md) — syntax (multi-line, exceptions, opaque values, ellipsis matching), `~S"""` sigil for interpolation, gotchas (map ordering, binding leaks, module persistence), when to use doctests vs unit tests, `doctest_file` for Markdown.
+
 Write the doctest example first — it becomes both documentation and test:
 
 ```elixir
