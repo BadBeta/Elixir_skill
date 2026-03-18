@@ -961,3 +961,10 @@ def decrement_stock(product, quantity) do
   end
 end
 ```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — Ecto rules (15), key patterns, BAD/GOOD pairs
+- **[ecto-reference.md](ecto-reference.md)** — Quick-lookup tables: field types, changeset API, Query.API functions, Repo API, migrations, Multi, custom type callbacks, association helpers
+- **[testing-reference.md](testing-reference.md)** — Ecto testing patterns, sandbox setup, DataCase
+- **[production.md](production.md)** — Production Repo configuration, telemetry

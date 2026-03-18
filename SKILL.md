@@ -22,8 +22,8 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 | [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), notation, atoms/tuples/maps/functions as types, dynamic(), inference, compiler warnings, @spec vs gradual types, roadmap |
 | [architecture-reference.md](architecture-reference.md) | Architecture layouts, Phoenix contexts, layered/pipeline architecture, production patterns, anti-patterns catalog |
 | [debugging-profiling.md](debugging-profiling.md) | IO.inspect, dbg, IEx.pry, break!, Rexbug, system introspection, Logger, fprof/eprof/cprof/tprof, Benchee, memory/VM/scheduler profiling |
-| [ecto-reference.md](ecto-reference.md) | Ecto field types, changeset API, query operations, migration options, Repo API, Multi |
-| [ecto-examples.md](ecto-examples.md) | Complete Ecto examples: schemas, queries, migrations, Multi, soft delete, multi-tenancy |
+| [ecto-reference.md](ecto-reference.md) | Ecto field types, changeset API, **Query.API functions** (fragment, type, coalesce, dynamic, selected_as, parent_as, exists, window functions), Repo API, Multi, migrations, **custom type callbacks**, **association helpers** (assoc/build_assoc), schemaless changesets |
+| [ecto-examples.md](ecto-examples.md) | Complete Ecto examples: schemas, multi-step changesets, composable queries, dynamic filters, preloading strategies, migrations, Multi patterns, custom types, soft delete, multi-tenancy, streaming, optimistic locking |
 | [otp-reference.md](otp-reference.md) | OTP callback signatures, ETS operations, process debugging, release management |
 | [otp-examples.md](otp-examples.md) | Complete OTP examples: rate limiter, state machine, worker pool, cache, circuit breaker, distribution |
 | [otp-advanced.md](otp-advanced.md) | GenStage, Flow, Broadway, hot code upgrades, production debugging |
@@ -1852,6 +1852,13 @@ from(p in Post,
 ```
 
 ### Migration & Multi — see [ecto-reference.md](ecto-reference.md) and [ecto-examples.md](ecto-examples.md)
+
+> **Deep-dive:** [ecto-reference.md](ecto-reference.md) — Query.API functions (fragment, type/2, coalesce, dynamic/2,
+> selected_as, parent_as, exists, ago/2, window functions), custom type callbacks (type/cast/load/dump/equal?),
+> association helpers (Ecto.assoc/2, build_assoc/3), schemaless changesets, Repo.transact vs transaction.
+> [ecto-examples.md](ecto-examples.md) — Full worked examples: composable queries with named bindings, dynamic
+> filters, preloading strategies (separate vs join vs nested), CTE/lateral joins, upsert patterns, Multi with
+> audit trails, custom Ecto.Type (Money), soft delete with prepare_query, multi-tenancy, streaming, optimistic locking.
 
 ### Common Mistakes (BAD/GOOD)
 

@@ -190,9 +190,9 @@ end
 | `insert_all/3` | `{count, nil \| [map]}` | Bulk insert |
 | `update_all/3` | `{count, nil \| [map]}` | Bulk update |
 | `delete_all/2` | `{count, nil \| [map]}` | Bulk delete |
-| `stream/2` | `Enum.t()` | Streaming (requires transaction) |
-| `transact/2` | `{:ok, result}` \| `{:error, reason}` | Transaction (preferred) |
-| `transaction/2` | `{:ok, result}` \| `{:error, reason}` | Transaction (legacy) |
+| `stream/2` | `Enum.t()` | Streaming — requires transaction; `:max_rows` option (default 500) |
+| `transact/2` | `{:ok, result}` \| `{:error, reason}` | Transaction (**preferred**) — fn must return `{:ok, _}` or `{:error, _}` |
+| `transaction/2` | `{:ok, result}` \| `{:error, reason}` | Transaction (**deprecated**) — auto-wraps return, use `Repo.rollback/1` |
 
 ## Repo insert/update Options
 
@@ -413,7 +413,213 @@ user
 ```elixir
 Multi.new()
 |> Multi.insert(:user, invalid_changeset)   # valid?: false
-|> Repo.transaction()                        # Returns {:error, :user, changeset, %{}}
+|> Repo.transact()                           # Returns {:error, :user, changeset, %{}}
 # Transaction never started — the invalid changeset was caught pre-transaction
 # But function-based operations skip this check (changeset doesn't exist yet)
 ```
+
+## Query Expression Functions (Ecto.Query.API)
+
+Functions available inside `from`, `where`, `select`, `order_by`, etc. Require `import Ecto.Query`.
+
+### Comparison & Logic
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `==`, `!=`, `<`, `>`, `<=`, `>=` | `where: p.age > 18` | Standard comparisons |
+| `and`, `or`, `not` | `where: p.active and not p.banned` | Boolean logic |
+| `in/2` | `where: p.status in [:draft, :published]` | List, array column, or subquery |
+| `is_nil/1` | `where: is_nil(p.deleted_at)` | NULL check |
+
+### Aggregates
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `count/0` | `select: count()` | Count all rows |
+| `count/1` | `select: count(p.id)` | Count non-null values |
+| `count/2` | `select: count(p.category, :distinct)` | Count distinct values |
+| `avg/1` | `select: avg(p.price)` | Average |
+| `sum/1` | `select: sum(p.views)` | Sum |
+| `min/1`, `max/1` | `select: max(p.inserted_at)` | Min/max |
+| `filter/2` | `select: avg(p.value) \|> filter(p.value > 0)` | Postgres FILTER clause on aggregate |
+
+### Fragments & Type Casting
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `fragment/1` | `fragment("lower(?)", p.title)` | Raw SQL — `?` for params |
+| `fragment` + `splice/1` | `fragment("? IN (?)", p.id, splice(^ids))` | Variable-length params |
+| `type/2` | `type(^value, :string)` | Cast to Ecto type (not DB type) |
+| `type/2` column | `type(^value, p.field)` | Cast to match column's type |
+| `coalesce/2` | `coalesce(p.nickname, p.name)` | First non-null; chain for 3+ args |
+
+### Time & Date
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `ago/2` | `where: p.created_at > ago(3, "month")` | Subtract from UTC now (computed in Elixir) |
+| `from_now/2` | `where: p.expires_at < from_now(1, "week")` | Add to UTC now |
+| `datetime_add/3` | `datetime_add(p.start, 1, "hour")` | Add interval to datetime |
+| `date_add/3` | `date_add(p.date, 7, "day")` | Add interval to date |
+
+Interval strings: `"year"`, `"month"`, `"week"`, `"day"`, `"hour"`, `"minute"`, `"second"`, `"millisecond"`, `"microsecond"`.
+
+### String
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `like/2` | `where: like(p.title, "Elixir%")` | Case-sensitive (case-insensitive on MySQL) |
+| `ilike/2` | `where: ilike(p.title, "%elixir%")` | Case-insensitive — Postgres only |
+
+### Named Bindings & Subqueries
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `as/1` | `from p in Post, as: :post` | Name a binding for later reference |
+| `parent_as/1` | `parent_as(:post).id` | Reference parent query binding in subquery |
+| `exists/1` | `where: exists(subquery)` | TRUE if subquery returns rows |
+| `any/1` | `where: p.id == any(subquery)` | Compare against any subquery row |
+| `all/1` | `where: p.price > all(subquery)` | Compare against all subquery rows |
+| `subquery/2` | `where: p.id in subquery(q)` | Nest a query as subquery |
+
+### Computed Columns
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `selected_as/2` | `selected_as(sum(p.views), :total)` | Create alias in `select` |
+| `selected_as/1` | `order_by: selected_as(:total)` | Reference alias in `group_by`/`order_by`/`having` |
+
+### Struct & Map Selection
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `map/2` | `select: map(p, [:title, :body])` | Return map with selected fields |
+| `struct/2` | `select: struct(p, [:title])` | Return struct with selected fields |
+| `merge/2` | `select: merge(p, %{custom: p.x})` | Merge map into result |
+| `field/2` | `field(p, ^field_name)` | Dynamic field access |
+| `json_extract_path/2` | `p.metadata["key"]` | JSON field access (sugar syntax) |
+
+### Dynamic Queries
+
+`dynamic/2` (macro in `Ecto.Query`) builds composable query fragments:
+
+```elixir
+import Ecto.Query
+
+# Build conditions incrementally
+conditions = dynamic([p], p.active == true)
+conditions = if title, do: dynamic([p], p.title == ^title and ^conditions), else: conditions
+from p in Post, where: ^conditions
+
+# In order_by
+order = [asc: dynamic([p], fragment("lower(?)", p.title))]
+from p in Post, order_by: ^order
+
+# In select (map form)
+fields = %{total: dynamic([p], sum(p.views))}
+from p in Post, select: ^fields, group_by: p.category_id
+
+# In update
+updates = [set: [score: dynamic([p], p.views * 2 + p.likes)]]
+from p in Post, update: ^updates
+```
+
+### Window Functions
+
+Available via `over/2` — see `Ecto.Query.WindowAPI`:
+
+| Function | Notes |
+|----------|-------|
+| `row_number/0` | Row number within partition |
+| `rank/0`, `dense_rank/0` | Ranking with/without gaps |
+| `ntile/1` | Divide into N buckets |
+| `lag/1-3`, `lead/1-3` | Previous/next row values |
+| `first_value/1`, `last_value/1` | First/last in window |
+| `nth_value/2` | Nth value in window |
+| `percent_rank/0`, `cume_dist/0` | Statistical ranking |
+
+```elixir
+from p in Post,
+  select: %{title: p.title, rank: over(row_number(), :by_cat)},
+  windows: [by_cat: [partition_by: p.category_id, order_by: [desc: p.views]]]
+```
+
+### Query Helper Functions
+
+| Function | Usage | Notes |
+|----------|-------|-------|
+| `has_named_binding?/2` | `has_named_binding?(query, :comments)` | Check if binding exists (avoid duplicate joins) |
+| `with_named_binding/3` | `with_named_binding(query, :comments, fn q, b -> ...)` | Add binding only if not present |
+| `values/2` | `values([%{id: 1}, %{id: 2}], %{id: :integer})` | Constant table (Postgres VALUES) |
+
+## Association Helpers (Ecto module)
+
+| Function | Signature | Purpose |
+|----------|-----------|---------|
+| `Ecto.assoc/2` | `Ecto.assoc(struct_or_structs, assoc)` | Returns query for associated records |
+| `Ecto.assoc/2` nested | `Ecto.assoc(posts, [:comments, :author])` | Traverse through associations |
+| `Ecto.build_assoc/3` | `Ecto.build_assoc(struct, assoc, attrs \\ %{})` | Build struct with FK pre-filled |
+
+```elixir
+# Query for a post's comments
+Repo.all(Ecto.assoc(post, :comments))
+
+# Build associated struct
+comment = Ecto.build_assoc(post, :comments, body: "Great post!")
+# => %Comment{post_id: post.id, body: "Great post!"}
+
+# Traverse nested associations (all authors who commented on these posts)
+Repo.all(Ecto.assoc(posts, [:comments, :author]))
+```
+
+## Custom Ecto Type Callbacks
+
+### Basic Type (`use Ecto.Type`)
+
+| Callback | Returns | Required |
+|----------|---------|----------|
+| `type/0` | Ecto primitive (`:string`, `:integer`, etc.) | Yes |
+| `cast/1` | `{:ok, value}` \| `:error` \| `{:error, keyword()}` | Yes |
+| `load/1` | `{:ok, value}` \| `:error` | Yes |
+| `dump/1` | `{:ok, value}` \| `:error` | Yes |
+| `equal?/2` | `boolean` | No (defaults to `==`) |
+| `embed_as/1` | `:self` \| `:dump` | No (defaults to `:self`) |
+| `autogenerate/0` | `term` | No |
+
+Data flow: **user input** →`cast`→ **Elixir value** →`dump`→ **DB value** →`load`→ **Elixir value**
+
+### Parameterized Type (`use Ecto.ParameterizedType`)
+
+For types that need configuration (like `Ecto.Enum`). Same callbacks but with extra `params` argument:
+
+| Callback | Signature | Required |
+|----------|-----------|----------|
+| `init/1` | `init(opts) :: params` | Yes |
+| `type/1` | `type(params)` | Yes |
+| `cast/2` | `cast(value, params)` | Yes |
+| `load/3` | `load(value, loader_fn, params)` | Yes |
+| `dump/3` | `dump(value, dumper_fn, params)` | Yes |
+
+Key difference: `load/3` and `dump/3` receive loader/dumper functions for composite types, and are called for `nil` values (unlike basic types).
+
+## Schemaless Changesets
+
+For forms/validation without a database-backed schema:
+
+```elixir
+types = %{query: :string, min_price: :decimal, sort: {:parameterized, Ecto.Enum, Ecto.Enum.init(values: [:relevance, :price])}}
+
+{%{}, types}
+|> Ecto.Changeset.cast(params, Map.keys(types))
+|> Ecto.Changeset.validate_required([:query])
+|> Ecto.Changeset.apply_action(:validate)
+```
+
+**Limitation:** `unsafe_validate_unique/4` does NOT work with schemaless changesets.
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — Ecto rules (15), key patterns, BAD/GOOD pairs (N+1, TOCTOU, god changeset)
+- **[ecto-examples.md](ecto-examples.md)** — Complete worked examples: schemas, multi-step changesets, composable queries, dynamic filters, preloading strategies, migrations, Multi patterns, custom types, soft delete, multi-tenancy, streaming, optimistic locking
+- **[testing-reference.md](testing-reference.md)** — Ecto sandbox setup, DataCase, factory patterns
+- **[production.md](production.md)** — Repo configuration, telemetry, connection pooling
