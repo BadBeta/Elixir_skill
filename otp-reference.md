@@ -2,6 +2,27 @@
 
 Quick-lookup tables for OTP callback signatures, ETS operations, process debugging, and release management.
 
+## Contents
+
+- [GenServer Callbacks](#genserver-callbacks) — init, handle_call/cast/info/continue, terminate, format_status
+- [gen_statem Callbacks](#gen_statem-callbacks) — callback_mode, state functions, actions
+- [Supervisor](#supervisor) — child specs, restart values, strategies
+- [ETS Cheatsheet](#ets-cheatsheet) — create, read, write, delete, counters, iteration
+- [Match Spec Syntax](#match-spec-syntax) — pattern variables, guards, select/delete
+- [Process Registry Patterns](#process-registry-patterns) — local, global, via Registry
+- [Process Info Keys](#process-info-keys) — memory, reductions, mailbox, stack
+- [:sys Module](#sys-module--debugging-otp-processes) — get_state, trace, statistics
+- [Node Operations](#node-operations) — connect, ping, discovery
+- [RPC / ERPC](#rpc--erpc) — sync/async remote calls
+- [Application Callbacks](#application-callbacks) — start, stop, prep_stop
+- [Release Commands](#release-commands) — build, run, remote access
+- [Common Telemetry Events](#common-telemetry-events) — Phoenix, Ecto, Oban, VM
+- [Debugging Quick Reference](#debugging-quick-reference) — recon, process inspection
+- [Common Exit Reasons](#common-exit-reasons) — reason → supervisor action
+- [Hot Code Upgrade Cheatsheet](#hot-code-upgrade-cheatsheet) — code module, appups, release handler
+- [Memory Analysis](#memory-analysis) — system, per-process, ETS, binary
+- [Extended OTP Reference](#extended-otp-reference-from-main-skill) — format_status, call vs cast, links vs monitors, PartitionSupervisor, ETS advanced, :persistent_term, :counters/:atomics
+
 ## GenServer Callbacks
 
 ```elixir
@@ -906,3 +927,10 @@ ref = :atomics.new(1, [])
 :atomics.get(ref, 1)
 :atomics.compare_exchange(ref, 1, expected, desired)
 ```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — OTP rules, GenServer/gen_statem key patterns, supervisor strategies, decision frameworks
+- **[otp-advanced.md](otp-advanced.md)** — GenStage, Flow, Broadway, hot code upgrades, production debugging
+- **[otp-examples.md](otp-examples.md)** — Complete implementations: rate limiter, connection state machine, worker pool, circuit breaker, cache
+- **[production.md](production.md)** — Production patterns, telemetry, periodic work, graceful shutdown

@@ -2,6 +2,62 @@
 
 Deep-dive into GenStage, Flow, Broadway, hot code upgrades, and production patterns.
 
+## Rules for Advanced OTP Patterns (LLM)
+
+1. **PREFER `Task.async_stream` over GenStage** for simple parallel map operations — GenStage adds complexity only justified by backpressure needs.
+2. **ALWAYS set explicit `max_demand` and `min_demand`** on GenStage consumers — defaults cause bursty demand patterns.
+3. **PREFER Broadway over raw GenStage** for queue-based data processing (SQS, RabbitMQ, Kafka) — Broadway handles batching, fault tolerance, and graceful shutdown.
+4. **NEVER use hot code upgrades for stateless services** — use rolling restarts instead. Hot upgrades are only worth the complexity when preserving in-memory state matters.
+5. **ALWAYS test `code_change/3` state migrations** before deploying hot upgrades — untested migrations corrupt running state.
+6. **ALWAYS use `:recon_trace` with explicit limits** for production tracing — never `:dbg` or raw `:erlang.trace` (no safety limits, can crash nodes).
+
+## Common Mistakes (BAD/GOOD)
+
+**Using GenStage for simple parallelism:**
+```elixir
+# BAD: GenStage pipeline for a one-shot parallel map
+defmodule Transform do
+  use GenStage
+  # ... 50+ lines of producer/consumer boilerplate for a simple parallel map
+end
+```
+
+```elixir
+# GOOD: Task.async_stream for simple parallel work
+results =
+  items
+  |> Task.async_stream(&process/1, max_concurrency: 10, timeout: 30_000)
+  |> Enum.map(fn {:ok, result} -> result end)
+```
+
+**Untuned Broadway concurrency:**
+```elixir
+# BAD: Default concurrency — no thought given to resource limits
+processors: [default: []],
+batchers: [default: [batch_size: 10]]
+```
+
+```elixir
+# GOOD: Tuned to match downstream capacity
+processors: [default: [concurrency: 10, max_demand: 10]],
+batchers: [default: [batch_size: 100, batch_timeout: 1_000, concurrency: 5]]
+```
+
+**Unsafe production tracing:**
+```elixir
+# BAD: No limits — can generate millions of trace messages and crash the node
+:dbg.tracer()
+:dbg.p(:all, :c)
+:dbg.tp(MyModule, :my_function, :x)
+```
+
+```elixir
+# GOOD: recon_trace with automatic limit (stops after 100 traces)
+:recon_trace.calls({MyModule, :my_function, :return_trace}, 100)
+# Always clean up
+:recon_trace.clear()
+```
+
 ## GenStage (Backpressure)
 
 GenStage is a specification for exchanging events between producers and consumers with built-in backpressure. Consumers request demand from producers, preventing overload.
@@ -858,3 +914,10 @@ defmodule MyApp.BatchHandler do
   end
 end
 ```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — OTP rules, GenServer/gen_statem key patterns, supervisor strategies, decision frameworks
+- **[otp-reference.md](otp-reference.md)** — Callback signatures, ETS cheatsheet, match specs, process info, release commands
+- **[otp-examples.md](otp-examples.md)** — Complete implementations: rate limiter, connection state machine, worker pool, circuit breaker, cache, telemetry
+- **[production.md](production.md)** — Production deployment patterns, telemetry deep-dive, periodic work, graceful shutdown

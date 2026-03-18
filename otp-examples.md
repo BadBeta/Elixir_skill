@@ -2929,3 +2929,10 @@ children = [
   {DynamicSupervisor, strategy: :one_for_one, name: MyApp.PoolSupervisor}
 ]
 ```
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — OTP rules, GenServer/gen_statem key patterns, supervisor strategies, decision frameworks
+- **[otp-reference.md](otp-reference.md)** — Callback signatures, ETS cheatsheet, match specs, process info, release commands
+- **[otp-advanced.md](otp-advanced.md)** — GenStage, Flow, Broadway, hot code upgrades, production debugging
+- **[production.md](production.md)** — Production patterns, telemetry deep-dive (also covers telemetry — see Telemetry Integration example above for complementary patterns)
