@@ -144,6 +144,24 @@ defmodule MyApp.CommandedApp do
 
   router(MyApp.Router)
 end
+
+# Aggregate — ALWAYS use the behaviour macro
+defmodule MyApp.Aggregates.Account do
+  use Commanded.Aggregates.Aggregate,   # Injects GenServer process management
+    snapshotting: false                  # Optional: [snapshot_every: 100, snapshot_version: 1]
+
+  defstruct [:account_id, :email, balance: 0, status: nil]
+
+  # execute/2 — handle commands, return event(s) or {:error, reason}
+  def execute(%__MODULE__{status: nil}, %OpenAccount{} = cmd) do
+    %AccountOpened{account_id: cmd.account_id, email: cmd.email}
+  end
+
+  # apply/2 — reconstruct state from events (REQUIRED callback)
+  def apply(%__MODULE__{} = acct, %AccountOpened{} = e) do
+    %__MODULE__{acct | account_id: e.account_id, email: e.email, status: :open}
+  end
+end
 ```
 
 ## Router DSL
@@ -185,10 +203,22 @@ end
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `timeout` | integer | Command execution timeout (ms) |
+| `timeout` | integer | Command execution timeout (ms), default 5000 |
 | `consistency` | `:eventual` \| `:strong` | Wait for projections before returning |
 | `metadata` | map | Attached to events (user_id, correlation_id) |
-| `returning` | `:aggregate_state` \| `:aggregate_version` \| `:events` \| `:execution_result` | What to return on success |
+| `returning` | atom \| `false` | What to return on success (see below) |
+| `causation_id` | UUID string | ID of the event/command that caused this one |
+| `correlation_id` | UUID string | Links related commands/events across aggregates |
+
+### `returning:` Option Values
+
+| Value | Returns on success | Use when |
+|-------|--------------------|----------|
+| (default / `false`) | `:ok` | Fire-and-forget commands |
+| `:aggregate_state` | `{:ok, %AggregateStruct{}}` | Need updated state for response |
+| `:aggregate_version` | `{:ok, integer()}` | Optimistic concurrency checks |
+| `:events` | `{:ok, [%Event{}]}` | Need to inspect emitted events |
+| `:execution_result` | `{:ok, %Commanded.Commands.ExecutionResult{}}` | Need everything (uuid, version, events, metadata) |
 
 ```elixir
 # Dispatch with options — from Commanded test suite
@@ -296,6 +326,8 @@ defmodule MyApp.Projectors.AccountSummary do
     repo: MyApp.Repo,
     name: "AccountSummary"
 
+  import Ecto.Query  # Required for from/2 in update_all projections
+
   project(%AccountOpened{} = event, _metadata, fn multi ->
     Ecto.Multi.insert(multi, :account, %AccountSummary{
       account_id: event.account_id,
@@ -333,6 +365,88 @@ end
 | `{:start!, id}` | Start if not exists, error if exists |
 | `{:continue!, id}` | Continue, error if not started |
 | `false` | Not interested in this event |
+
+## Commanded.Aggregate.Multi (Multi-Event Commands)
+
+Use when a single command must emit multiple events with state threaded between them — e.g., a withdrawal that also triggers an overdrawn warning.
+
+```elixir
+alias Commanded.Aggregate.Multi
+
+def execute(%__MODULE__{} = acct, %WithdrawFunds{amount: amount}) do
+  acct
+  |> Multi.new()
+  |> Multi.execute(:withdraw, fn state ->
+    %FundsWithdrawn{account_id: state.account_id, amount: amount, new_balance: state.balance - amount}
+  end)
+  |> Multi.execute(:check_overdrawn, fn state ->
+    # state already has the withdrawal applied — balance is updated
+    if state.balance < 0 do
+      %AccountOverdrawn{account_id: state.account_id, balance: state.balance}
+    else
+      []  # No event
+    end
+  end)
+end
+```
+
+**How it works:** After each `execute` step, returned events are applied via `apply/2` to update the aggregate state. The next step receives the updated state. This enables dependent calculations (running totals, threshold checks).
+
+| Function | Purpose |
+|----------|---------|
+| `Multi.new(aggregate)` | Initialize from current aggregate state |
+| `Multi.execute(multi, name, fun)` | Add a step; `fun` receives updated state, returns event(s) or `[]` |
+| `Multi.reduce(multi, name, enum, fun)` | Process an enumerable, threading state through each item |
+
+## Phoenix Integration
+
+Dispatching commands from Phoenix controllers and LiveView:
+
+```elixir
+# In a Phoenix context module
+defmodule MyApp.Accounts do
+  alias MyApp.CommandedApp
+
+  def open_account(attrs) do
+    cmd = %OpenAccount{
+      account_id: Ecto.UUID.generate(),
+      email: attrs["email"],
+      name: attrs["name"]
+    }
+
+    case CommandedApp.dispatch(cmd, returning: :aggregate_state) do
+      {:ok, _state} -> {:ok, cmd.account_id}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+end
+
+# In a Phoenix controller
+def create(conn, %{"account" => params}) do
+  case MyApp.Accounts.open_account(params) do
+    {:ok, account_id} ->
+      conn |> put_flash(:info, "Account created") |> redirect(to: ~p"/accounts/#{account_id}")
+    {:error, reason} ->
+      conn |> put_flash(:error, inspect(reason)) |> render(:new)
+  end
+end
+
+# In a LiveView
+def handle_event("deposit", %{"amount" => amount}, socket) do
+  cmd = %DepositFunds{account_id: socket.assigns.account_id, amount: String.to_integer(amount)}
+
+  case MyApp.CommandedApp.dispatch(cmd, consistency: :strong) do
+    :ok ->
+      # Strong consistency — projection is updated, safe to re-read
+      account = MyApp.Accounts.get_account(socket.assigns.account_id)
+      {:noreply, assign(socket, :account, account)}
+    {:error, reason} ->
+      {:noreply, put_flash(socket, :error, inspect(reason))}
+  end
+end
+```
+
+**Key pattern:** Context modules wrap dispatch, controllers/LiveView call contexts. Use `returning: :aggregate_state` when you need the result, `consistency: :strong` when you'll immediately read the projection.
 
 ## Snapshotting
 
@@ -472,3 +586,10 @@ config :my_app, MyApp.CommandedApp,
 | Events not being processed | Verify handler in supervision tree, check handler `name` matches |
 | Projection out of sync | `mix commanded.reset --app App --handler Handler` |
 | Slow aggregate rehydration | Enable snapshotting: `snapshot_every: 100` |
+
+## Related Files
+
+- **[eventsourcing-examples.md](eventsourcing-examples.md)** — 13 complete worked examples: aggregates, commands/events, Ecto changesets, router/application, projections, process managers, testing, upcasting, GDPR crypto-shredding, projection rebuilding
+- **[SKILL.md](SKILL.md)** — Core Elixir skill with Event Sourcing & CQRS overview, "When to Use" decision guide
+- **[ecto-reference.md](ecto-reference.md)** — Ecto schemas, changesets, queries, migrations — used in projections and command validation
+- **[otp-reference.md](otp-reference.md)** — Supervision trees, GenServer patterns — Commanded aggregates are GenServer processes

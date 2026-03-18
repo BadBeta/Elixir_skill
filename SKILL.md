@@ -1,6 +1,6 @@
 ---
 name: elixir
-version: "0.11"
+version: "0.2.0"
 description: Elixir functional programming, OTP, and Ecto — pattern matching, pipelines, Enum/Stream, with-chains, ok/error tuples, multi-clause functions, GenServer, gen_statem, supervision, ETS, Ecto schemas/changesets/queries/migrations, configuration, telemetry, HTTP clients, and type system. ALWAYS use this skill when writing Elixir to avoid imperative anti-patterns. ALWAYS use when designing OTP supervision trees, state machines, or distributed systems. ALWAYS consult the Architecture and OTP sections when planning new Elixir projects, refactoring existing ones, or making structural decisions.
 ---
 
@@ -29,7 +29,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 | [otp-advanced.md](otp-advanced.md) | GenStage, Flow, Broadway, hot code upgrades, production debugging |
 | [testing-reference.md](testing-reference.md) | Testing quick refs: assertions, Mox API, LiveView/Channel helpers, StreamData |
 | [testing-examples.md](testing-examples.md) | Complete testing examples: infrastructure, Mox, channels, LiveView, property testing, Oban |
-| [eventsourcing-reference.md](eventsourcing-reference.md) | Commanded API, router DSL, middleware, projections, process managers |
+| [eventsourcing-reference.md](eventsourcing-reference.md) | Commanded API, router DSL, dispatch options (`returning:`), **Aggregate.Multi**, **Phoenix integration** (controller/LiveView dispatch), aggregate `use` macro, middleware, projections, process managers |
 | [eventsourcing-examples.md](eventsourcing-examples.md) | Complete event sourcing examples: aggregates, projectors, process managers, testing |
 | [production.md](production.md) | Production Phoenix patterns, Edge/IoT patterns, Oban, telemetry, HTTP clients |
 

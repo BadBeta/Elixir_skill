@@ -10,6 +10,8 @@ From Commanded's test suite pattern: aggregates are pure functions tested via `e
 
 ```elixir
 # lib/my_app/aggregates/account.ex
+# NOTE: Production aggregates need `use Commanded.Aggregates.Aggregate` — see eventsourcing-reference.md
+# Shown here as plain module to demonstrate execute/2 and apply/2 as pure functions for testing.
 defmodule MyApp.Aggregates.Account do
   defstruct [
     :account_id,
@@ -271,6 +273,8 @@ defmodule MyApp.Projectors.AccountSummary do
     application: MyApp.CommandedApp,
     repo: MyApp.Repo,
     name: "AccountSummary"
+
+  import Ecto.Query  # Required for from/2 in update_all projections
 
   alias MyApp.Events.{AccountOpened, FundsDeposited, FundsWithdrawn, AccountClosed}
   alias MyApp.Projections.AccountSummary
@@ -860,3 +864,12 @@ project(%AccountOpened{} = e, _metadata, fn multi ->
   )
 end)
 ```
+
+---
+
+## Related Files
+
+- **[eventsourcing-reference.md](eventsourcing-reference.md)** — Rules, Commanded API tables, router DSL, dispatch options, Aggregate.Multi, Phoenix integration, middleware, snapshotting, upcasting, troubleshooting
+- **[SKILL.md](SKILL.md)** — Core Elixir skill with Event Sourcing & CQRS overview and "When to Use" decision guide
+- **[ecto-reference.md](ecto-reference.md)** — Ecto schemas, changesets, queries, Multi — used in projections and command validation
+- **[testing-reference.md](testing-reference.md)** — ExUnit patterns, Mox, process testing — applies to aggregate and process manager tests
