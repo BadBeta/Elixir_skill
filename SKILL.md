@@ -15,7 +15,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 | File | Contents |
 |------|----------|
 | [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction |
-| [quick-references.md](quick-references.md) | Enum, Map, Keyword, List, String, Regex, File/Path, URI, Date/Time, IO, Access, Process, Range, Agent quick refs, Erlang stdlib (21 modules), JSON |
+| [quick-references.md](quick-references.md) | **LLM rules** (graphemes, atom safety, Enum.at, strftime) + **Elixir stdlib**: Enum (transform, filter, reduce, search, group, combine, access), Map (read, write, transform, pop, intersect), Keyword (read, write, split, validate), List (operations, tuple-list), String (split/join, trim/pad, search/test, transform, convert, **graphemes/codepoints/byte_size**, normalize), Regex, File/Path/System, URI/Base encoding, Date/Time (**Calendar.strftime**, **DateTime.shift**), IO/Inspect, Access/nested data, Process, Macro/Module (AST traversal), Range, Agent + **Erlang stdlib** (21 modules): :queue, :persistent_term, :atomics, :counters, :ets, :dets, :ordsets, :digraph, :gb_trees, :array, :math, :rand, :binary, :erlang, :lists, :timer, :crypto, :io_lib, :calendar, :unicode, :zlib, :os, :telemetry, :sys, :file + **JSON** (built-in 1.18+, Jason, safe JS interop) |
 | [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, comprehensions, function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, advanced patterns (pipeline, option registration, AST traversal, backoff) |
 | [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, readable code patterns (pipelines, guards, naming, conditionals), BAD/GOOD pairs |
 | [documentation.md](documentation.md) | @moduledoc/@doc patterns, @spec/@type/@typedoc, @since/@deprecated, doctests (multi-line, exceptions, ellipsis), ExDoc config, cross-references |
@@ -1521,9 +1521,13 @@ System.tmp_dir!()                       # temp directory path
 ```
 
 > **Deep dive:** [quick-references.md](quick-references.md) — full Enum (transform, filter, reduce, search, group,
-> collect, access), Map (read, write, transform, pop, nested update), Keyword (read, write, split, validate),
-> List (operations, tuple-list), String (split/join, trim/pad, search/test, transform, convert, parsing),
-> Regex, URI/Encoding, Date/Time, IO/Inspect, Access/Nested Data, Process, Range, Agent, Erlang stdlib (21 modules).
+> collect, combine incl. `map_intersperse`), Map (read, write, transform, pop, `intersect/2,3`), Keyword (read,
+> write, split, validate), List (operations, tuple-list), String (split/join, trim/pad, search/test, transform,
+> convert, parsing, **graphemes vs codepoints**, `byte_size`, `normalize`), Regex (match, scan, named captures,
+> compile), File/Path/System, URI/Encoding/Base, Date/Time (`Calendar.strftime`, `DateTime.shift`),
+> IO/Inspect (options, pipeline debugging), Access/Nested Data (`get_in`/`put_in` with `Access.all`/`filter`/`key`),
+> Process/Concurrency, Application/Code, Macro/Module (AST traversal, `prewalk`/`postwalk`), Range, Agent,
+> Kernel pipeline helpers (`tap`/`then`/`dbg`), Erlang stdlib (21 modules), JSON encoding.
 
 ## Stream, Enum, and the Enumerable Protocol
 
@@ -1970,7 +1974,20 @@ q = :queue.new() |> :queue.in(:a) |> :queue.in(:b)
 :ets.lookup(:cache, key)  # [{key, value, timestamp}]
 ```
 
-> **Deep dive:** [quick-references.md](quick-references.md) — :queue (in_r, out_r, peek, to_list), :persistent_term (erase, info), :atomics/:counters (lock-free increment/add/sub, compare_exchange), :ordsets (sorted unique sets), :digraph (directed graphs, shortest path), :gb_trees (balanced trees), :array (functional arrays), :math/:rand (uniform, normal), :binary (split, match, copy, referenced_byte_size), :erlang (system_info, memory, monotonic_time, process_info), :lists (keyfind, keystore, usort, foldl), :io_lib (format strings), :calendar (date/time conversion), :unicode (characters_to_binary), :zlib (gzip/gunzip), :os (cmd, env), :sys (process debugging), :dets (disk-based ETS), :file (low-level file ops), Erlang data structure selection guide
+> **Deep dive:** [quick-references.md](quick-references.md) — :queue (in_r, out_r, peek, to_list, O(n) warnings),
+> :persistent_term (erase, info, hydration pattern), :atomics (CAS, lock-free rate limiting),
+> :counters (write-optimized vs atomic modes), :ets (CRUD, match specs, pattern literals vs guards,
+> owner process, DETS hydration, select_delete), :dets (disk-based ETS), :ordsets (sorted unique sets,
+> compiler usage), :digraph (vertices, edges, topsort, cycle detection, try/after cleanup),
+> :gb_trees (sorted KV, smallest/largest), :array (sparse, dynamic), :math (trig, log, pow),
+> :rand (uniform, uniform_real), :binary (compile_pattern, split, match, replace),
+> :erlang (term_to_binary with :safe, phash2 sharding, unique_integer, system_info, memory),
+> :lists (reverse/2, keyfind, usort, mapfoldl), :timer (tc, send_interval, unit conversions),
+> :crypto (strong_rand_bytes, hash, HMAC), :io_lib (format strings, hex/padded numbers),
+> :calendar (gregorian_seconds, day_of_week, valid_date), :unicode (NFC/NFD normalization),
+> :zlib (gzip/gunzip, compress/uncompress), :os (type detection), :telemetry (execute, span,
+> attach/attach_many), :sys (get_state, replace_state, trace), :file (consult, format_error,
+> code.priv_dir), Erlang data structure selection guide with complexity table
 
 ## JSON Encoding
 
