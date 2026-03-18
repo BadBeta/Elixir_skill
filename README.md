@@ -38,7 +38,7 @@ Even after all that Claude will sometimes sneak in some more if statements than 
 
 
 
-**Do not use agents for planning or implementation. Do it yourself. **
+**Do not use agents for planning or implementation. Do it yourself.**
 
 **ALWAYS load the elixir skill and read both SKILL.md and architecture-reference.md before starting to plan architecture or writing any code. No exceptions, so do it right now!** The core skill contains essential rules, decision frameworks, and key patterns. Use architecture-reference.md to decide on layering, context boundaries, and process architecture. Then consult supporting files:
 
