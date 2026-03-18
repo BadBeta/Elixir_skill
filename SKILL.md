@@ -19,7 +19,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 | [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, comprehensions, function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, advanced patterns (pipeline, option registration, AST traversal, backoff) |
 | [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, readable code patterns (pipelines, guards, naming, conditionals), BAD/GOOD pairs |
 | [documentation.md](documentation.md) | @moduledoc/@doc patterns, @spec/@type/@typedoc, @since/@deprecated, doctests (multi-line, exceptions, ellipsis), ExDoc config, cross-references |
-| [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), notation, atoms/tuples/maps/functions as types, dynamic(), inference, compiler warnings, @spec vs gradual types, roadmap |
+| [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), **binary/String.t/iodata decision table**, **@spec `when` clause**, **common @spec patterns** (GenServer, Phoenix, Plug, LiveView), @type best practices, defguard types, **Dialyzer setup**, compiler warnings with fixes, dynamic(), inference, roadmap |
 | [architecture-reference.md](architecture-reference.md) | Architecture layouts, Phoenix contexts, layered/pipeline architecture, production patterns, anti-patterns catalog |
 | [debugging-profiling.md](debugging-profiling.md) | IO.inspect, dbg, IEx.pry, break!, Rexbug, system introspection, Logger, fprof/eprof/cprof/tprof, Benchee, memory/VM/scheduler profiling |
 | [ecto-reference.md](ecto-reference.md) | Ecto field types, changeset API, **Query.API functions** (fragment, type, coalesce, dynamic, selected_as, parent_as, exists, window functions), Repo API, Multi, migrations, **custom type callbacks**, **association helpers** (assoc/build_assoc), schemaless changesets |
@@ -1894,7 +1894,7 @@ def profile_changeset(user, attrs), do: cast(user, attrs, [:name]) |> ...
 4. **PREFER pattern matching over type guards** when possible — the type system tracks patterns automatically.
 5. **ALWAYS read warnings as set operations** — "expected `integer()`, got `integer() or atom()`" means your value's type is a superset of what's expected.
 6. **ALWAYS use `@spec` on public functions** — even though the compiler infers types, specs serve as documentation and enable Dialyzer.
-7. **ALWAYS check what version introduced a feature** — Elixir 1.17 started type inference, 1.18 added pattern/guard typing, 1.19 adds map/list types, 1.20 adds function signatures.
+7. **ALWAYS check what version introduced a feature** — 1.17 started type inference on patterns/guards, 1.18 added cross-clause pattern typing, 1.19 expanded expression checking, 1.20 adds full function body inference and typed Map operations.
 
 ### Key Concepts
 
@@ -1904,9 +1904,12 @@ def profile_changeset(user, attrs), do: cast(user, attrs, [:name]) |> ...
 - **Warnings, not errors:** Type mismatches produce warnings. Code still compiles. Enable `--warnings-as-errors` in CI.
 
 > **Deep dive:** [type-system.md](type-system.md) — set-theoretic notation (union, intersection, negation),
-> how atoms/tuples/lists/maps/functions are modeled as types, dynamic() deep-dive (when to use, interaction
-> with inference), type inference mechanics (cross-clause narrowing, function body inference), reading compiler
-> warnings as set operations, @spec/@type vs gradual types, notation comparison table, roadmap (1.17-1.20).
+> atoms/tuples/lists/maps/functions as types, dynamic() deep-dive, type inference mechanics (cross-clause
+> narrowing, function body inference), practical warning examples with fixes, **binary() vs String.t() vs
+> iodata() decision table**, **@spec `when` clause for type variables**, **common @spec patterns** (GenServer,
+> Phoenix context, Plug, LiveView, Ecto), **@type best practices** (opaque, typep, t() convention),
+> **defguard type interaction**, **Dialyzer setup and comparison** with compiler types, notation comparison
+> table, version feature summary (1.17–1.20).
 
 ## More Quick References
 

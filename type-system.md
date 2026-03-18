@@ -266,6 +266,45 @@ type warning found at:
 | `badkey` | Key doesn't exist in the known map/struct shape |
 | `badindex` | Tuple element access out of bounds |
 
+### Practical Warning Examples and Fixes
+
+**Map key access on potentially missing key:**
+```text
+warning: incompatible types given to Map.fetch!/2:
+    Map.fetch!(config, :timeout)
+given types:
+    %{retries: integer()} and :timeout
+```
+Fix: the map shape doesn't include `:timeout`. Either add the key or use `Map.get/3` with a default.
+
+**Pattern can never match:**
+```text
+warning: incompatible types in pattern:
+    {:ok, value} = result
+given types:
+    :error or {:error, term()}
+```
+Fix: the expression only returns error tuples. The `{:ok, _}` branch is dead code — handle the error case.
+
+**Struct comparison with `<`/`>`:**
+```text
+warning: struct_comparison: using > with struct %DateTime{}
+```
+Fix: use `DateTime.compare/2` or `DateTime.before?/2` / `DateTime.after?/2` instead of `>`, `<`.
+
+**List concatenation type mismatch:**
+```text
+warning: incompatible types given to ++/2:
+    integer() ++ list(integer())
+```
+Fix: left side of `++` must be a list. Wrap in list: `[value] ++ rest`.
+
+**Redundant clause (1.20+):**
+```text
+warning: redundant clause — this clause cannot match because all cases are covered above
+```
+Fix: the previous clauses already handle all possible inputs. Remove the dead clause or reorder.
+
 ### Traditional Typespecs (`@spec` / `@type`)
 
 Typespecs use Erlang-based notation and are **separate from the set-theoretic type system**.
@@ -298,6 +337,27 @@ be replaced by set-theoretic type signatures in a future Elixir version.
 @type tree(value) :: :leaf | {:node, value, tree(value), tree(value)}
 ```
 
+**@type best practices:**
+
+```elixir
+# ALWAYS define t/0 for structs — it's the convention all tools expect
+@type t :: %__MODULE__{id: pos_integer(), email: String.t(), role: role()}
+
+# Use @opaque when callers should NOT pattern match on internals
+# Dialyzer will warn if callers destructure an opaque type
+@opaque t :: %__MODULE__{data: map(), cache: map()}
+
+# Use @typep for module-internal type aliases
+@typep internal_state :: {atom(), map(), non_neg_integer()}
+
+# Name types when used in 3+ specs or when the name adds meaning
+@type user_id :: pos_integer()
+@type coordinates :: {float(), float()}
+
+# Inline types when used once and self-evident
+@spec get(pos_integer()) :: t() | nil  # no need for a named "id" type here
+```
+
 **Function specs:**
 
 ```elixir
@@ -315,6 +375,30 @@ be replaced by set-theoretic type signatures in a future Elixir version.
 
 # No return (raises or loops forever)
 @spec raise_error(binary()) :: no_return()
+```
+
+**`when` clause — type variables for polymorphic functions:**
+
+```elixir
+# Return type depends on input type — use `when` to express this
+@spec get(agent, (state -> a), timeout) :: a when a: var
+# From Elixir's Agent module — `a` is a type variable, `var` means "any type"
+
+# Identity/passthrough functions
+@spec identity(a) :: a when a: term()
+
+# Constrained type variable
+@spec wrap(a) :: [a] when a: number()
+
+# Multiple type variables
+@spec zip(list(a), list(b)) :: list({a, b}) when a: term(), b: term()
+
+# Real-world: Enum.map/2
+@spec map(t, (element -> a)) :: [a] when a: var
+
+# Common mistake: don't use `when` if the return type doesn't depend on the input
+# BAD: @spec parse(a) :: {:ok, result()} when a: binary()
+# GOOD: @spec parse(binary()) :: {:ok, result()}
 ```
 
 **Key typespec types:**
@@ -445,4 +529,422 @@ def process(%User{} = user) do
   user.name
 end
 ```
+
+### binary() vs String.t() vs iodata() — Decision Table
+
+LLMs frequently confuse these. They are distinct types with different semantics:
+
+| Type | Meaning | Use When |
+|------|---------|----------|
+| `String.t()` | UTF-8 encoded binary | Text: user input, display strings, JSON values, filenames |
+| `binary()` | Raw bytes (any content) | Binary protocols, crypto output, file contents, Erlang interop |
+| `iodata()` | `binary() \| iolist()` | Building output for IO/sockets — avoids concatenation |
+| `iolist()` | Nested `[binary() \| char() \| iolist()]` | Efficient string building (templates, HTML) |
+| `charlist()` | `[char()]` | Erlang interop (`:io_lib.format`, NIF args) |
+
+**Key rules:**
+- **PREFER `String.t()` over `binary()`** for text in specs — it documents intent
+- **PREFER `iodata()`** for function params that write to IO/sockets — allows callers to pass either binary or iolist without concatenation
+- **Use `binary()`** only for raw bytes or Erlang interop where UTF-8 is not guaranteed
+- `IO.write/2` accepts `chardata()` (which includes `String.t()` and charlists)
+- `IO.binwrite/2` accepts `iodata()` (binary or iolist, no charlists)
+
+**From Elixir stdlib specs (verified):**
+```elixir
+# String module — always String.t() for text
+@spec String.upcase(String.t()) :: String.t()
+@spec String.to_integer(String.t()) :: integer()
+
+# IO module — iodata/chardata for output
+@spec IO.binwrite(device, iodata) :: :ok
+@spec IO.write(device, chardata | String.t()) :: :ok
+
+# IO conversion functions show the relationship
+@spec IO.iodata_to_binary(iodata) :: binary        # iodata → raw bytes
+@spec IO.chardata_to_string(chardata) :: String.t() # chardata → UTF-8 text
+```
+
+**BAD/GOOD:**
+```elixir
+# BAD: binary() for a user-facing string
+@spec greet(binary()) :: binary()
+
+# GOOD: String.t() documents UTF-8 text
+@spec greet(String.t()) :: String.t()
+
+# BAD: String.t() for a function that builds HTML (forces concatenation)
+@spec render(assigns :: map()) :: String.t()
+
+# GOOD: iodata() lets callers use iolist for efficient building
+@spec render(assigns :: map()) :: iodata()
+
+# BAD: binary() for a crypto hash (it IS raw bytes, but document it)
+@spec hash(binary()) :: binary()
+
+# BETTER: Named type adds clarity
+@type digest :: binary()
+@spec hash(binary()) :: digest()
+```
+
+### Common @spec Patterns by Context
+
+**GenServer callbacks:**
+```elixir
+# init/1
+@impl true
+@spec init(term()) :: {:ok, state()} | {:stop, reason :: term()}
+
+# handle_call/3
+@impl true
+@spec handle_call(request :: term(), GenServer.from(), state()) ::
+        {:reply, reply :: term(), state()}
+        | {:noreply, state()}
+        | {:stop, reason :: term(), reply :: term(), state()}
+
+# handle_cast/2
+@impl true
+@spec handle_cast(request :: term(), state()) ::
+        {:noreply, state()} | {:stop, reason :: term(), state()}
+
+# handle_info/2
+@impl true
+@spec handle_info(msg :: term(), state()) ::
+        {:noreply, state()} | {:stop, reason :: term(), state()}
+```
+
+**Phoenix context functions (standard CRUD):**
+```elixir
+@spec list_posts(keyword()) :: [Post.t()]
+@spec get_post(pos_integer()) :: Post.t() | nil
+@spec get_post!(pos_integer()) :: Post.t()
+@spec create_post(map()) :: {:ok, Post.t()} | {:error, Ecto.Changeset.t()}
+@spec update_post(Post.t(), map()) :: {:ok, Post.t()} | {:error, Ecto.Changeset.t()}
+@spec delete_post(Post.t()) :: {:ok, Post.t()} | {:error, Ecto.Changeset.t()}
+@spec change_post(Post.t(), map()) :: Ecto.Changeset.t()
+```
+
+**Ecto changeset functions:**
+```elixir
+@spec changeset(t() | Ecto.Changeset.t(), map()) :: Ecto.Changeset.t()
+@spec registration_changeset(t(), map()) :: Ecto.Changeset.t()
+```
+
+**Plug:**
+```elixir
+@spec init(keyword()) :: keyword()
+@spec call(Plug.Conn.t(), keyword()) :: Plug.Conn.t()
+```
+
+**Phoenix LiveView callbacks:**
+```elixir
+@spec mount(map(), map(), Phoenix.LiveView.Socket.t()) :: {:ok, Phoenix.LiveView.Socket.t()}
+@spec handle_event(String.t(), map(), Phoenix.LiveView.Socket.t()) ::
+        {:noreply, Phoenix.LiveView.Socket.t()}
+@spec handle_info(term(), Phoenix.LiveView.Socket.t()) ::
+        {:noreply, Phoenix.LiveView.Socket.t()}
+@spec render(map()) :: Phoenix.LiveView.Rendered.t()
+```
+
+### Custom Guards and Type Inference
+
+`defguard` creates reusable guard expressions. The type system understands guards for narrowing:
+
+```elixir
+# Define a custom guard
+defguard is_positive_integer(value) when is_integer(value) and value > 0
+
+# The type system narrows based on the guard's conditions
+def process(x) when is_positive_integer(x) do
+  # x is known to be integer() here
+  Integer.to_string(x)
+end
+
+# defguardp for module-private guards
+defguardp is_valid_status(s) when s in [:active, :inactive, :pending]
+
+def update_status(record, status) when is_valid_status(status) do
+  # status narrowed to :active or :inactive or :pending
+  %{record | status: status}
+end
+```
+
+**Type system interaction:** Guards composed of Kernel guard-safe functions (`is_integer/1`, `is_binary/1`, `is_map/1`, `is_atom/1`, `in/2`, comparison operators, `and`/`or`/`not`) all feed type inference. The compiler tracks the narrowing from each guard clause.
+
+**Important:** Only expressions allowed in guards can appear in `defguard`. These include: type checks (`is_*`), comparisons, arithmetic, boolean operators, `in/2`, `elem/2`, `hd/1`, `tl/1`, `length/1`, `map_size/1`, `tuple_size/1`, `is_map_key/2`, `binary_part/3`, and `node/0-1`.
+
+### Behaviour @callback and Type Checking
+
+When a module implements a behaviour with `@impl true`, the type system uses the `@callback` specs for checking:
+
+```elixir
+defmodule MyBehaviour do
+  @callback process(input :: term()) :: {:ok, result :: term()} | {:error, String.t()}
+end
+
+defmodule MyImpl do
+  @behaviour MyBehaviour
+
+  @impl true
+  def process(input) do
+    # Compiler knows this must return {:ok, _} | {:error, String.t()}
+    # If you return :wrong, you'll get a type warning (1.20+)
+    {:ok, transform(input)}
+  end
+end
+```
+
+The compiler checks that `@impl true` functions conform to the callback spec's return type. This is separate from Dialyzer — it's built into the compiler's type checking pass.
+
+### Dialyzer — Static Analysis with @spec
+
+Dialyzer (DIscrepancy AnaLyzer for ERlang) performs additional static analysis beyond the compiler's type system. It uses `@spec` annotations and builds a PLT (Persistent Lookup Table) of type information.
+
+**Setup with Dialyxir:**
+
+```elixir
+# mix.exs — add to deps
+defp deps do
+  [
+    {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+  ]
+end
+
+# mix.exs — optional project config
+def project do
+  [
+    ...,
+    dialyzer: [
+      plt_add_apps: [:mix, :ex_unit],       # add apps to PLT
+      plt_core_path: "_build/plt",           # cache PLT locally
+      flags: [:unmatched_returns, :error_handling, :underspecs]
+    ]
+  ]
+end
+```
+
+**Running:**
+```bash
+mix dialyzer              # First run builds PLT (slow), subsequent runs are fast
+mix dialyzer --format short  # Compact output
+```
+
+**Compiler type system vs Dialyzer:**
+
+| Aspect | Compiler (1.17+) | Dialyzer |
+|--------|-----------------|----------|
+| Approach | Set-theoretic inference | Success typing |
+| Annotations needed | None (infers from code) | Uses `@spec` |
+| Warnings | Type mismatches, dead code | Contract violations, unreachable code |
+| Speed | Runs during compilation | Separate pass (slower) |
+| Gradual | Yes (`dynamic()`) | No (either typed or untyped) |
+| False positives | Very low | Occasional |
+| Cross-module | stdlib typed, project code = `dynamic()` | Full cross-module via PLT |
+
+**Recommendation:** Use both. The compiler's type system catches structural errors during development. Dialyzer catches contract violations and cross-module issues. They complement each other — Dialyzer uses `@spec`, the compiler infers types independently.
+
+**Common Dialyzer warnings:**
+
+| Warning | Meaning |
+|---------|---------|
+| `The pattern can never match the type` | Dead code — pattern doesn't match possible values |
+| `Function has no local return` | Function always raises or loops |
+| `The created fun has no local return` | Anonymous function always fails |
+| `Contract violation` | Return value doesn't match @spec |
+| `Callback info mismatch` | @impl doesn't match @callback spec |
+
+### When NOT to Write @spec
+
+Not every function needs a spec. Over-speccing adds noise and maintenance burden without value.
+
+**ALWAYS spec:**
+- Public API functions (the module's contract with callers)
+- Behaviour callbacks (`@callback`)
+- Functions with non-obvious return types
+- Functions where type discipline prevents bugs (money, IDs, timestamps)
+
+**SKIP specs for:**
+- Trivial private helpers where types are obvious from the code
+- Single-use `defp` functions that just extract a step from a pipeline
+- Functions whose types are fully determined by the caller (private map/filter callbacks)
+- Test helper functions
+
+```elixir
+# GOOD: Public API — spec adds value
+@spec transfer(Account.t(), Account.t(), Decimal.t()) :: {:ok, Transfer.t()} | {:error, atom()}
+def transfer(from, to, amount), do: ...
+
+# UNNECESSARY: Trivial private helper — type is obvious
+# @spec format_name(String.t(), String.t()) :: String.t()  # skip this
+defp format_name(first, last), do: "#{first} #{last}"
+
+# GOOD: Private but non-obvious return type
+@spec calculate_fee(Decimal.t(), :standard | :express) :: Decimal.t()
+defp calculate_fee(amount, tier), do: ...
+```
+
+### @spec for Erlang Interop
+
+Erlang functions return Erlang types. These are where `binary()` vs `String.t()` vs `iodata()` matters most:
+
+```elixir
+# Networking — raw binary data, NOT UTF-8 text
+@spec send_packet(port(), binary()) :: :ok | {:error, :closed | :timeout}
+def send_packet(socket, data) do
+  :gen_tcp.send(socket, data)
+end
+
+# Crypto — raw bytes in, raw bytes out
+@spec hash(binary()) :: binary()
+def hash(data), do: :crypto.hash(:sha256, data)
+
+# Erlang string formatting — returns charlist, convert to String.t()
+@spec format_number(number()) :: String.t()
+def format_number(n) do
+  :io_lib.format("~.2f", [n]) |> IO.chardata_to_string()
+end
+
+# NIF return types — match the NIF's actual return
+@spec nif_parse(binary()) :: {:ok, map()} | {:error, binary()}
+def nif_parse(input), do: MyNif.parse(input)
+
+# ETS — term() in, term() out (ETS stores any term)
+@spec cache_get(atom(), term()) :: term() | nil
+def cache_get(table, key) do
+  case :ets.lookup(table, key) do
+    [{^key, value}] -> value
+    [] -> nil
+  end
+end
+
+# :timer — returns microseconds as integer
+@spec measure((() -> term())) :: {non_neg_integer(), term()}
+def measure(fun), do: :timer.tc(fun)
+```
+
+### Common @type Patterns for Reuse
+
+Define named types for concepts that appear across multiple specs:
+
+```elixir
+# Option/config types — enumerate valid options
+@type option ::
+  {:timeout, pos_integer()}
+  | {:retries, non_neg_integer()}
+  | {:on_error, :raise | :return}
+@type options :: [option()]
+
+@spec start(options()) :: {:ok, pid()} | {:error, term()}
+
+# Result types — standard ok/error with specific error reasons
+@type error_reason :: :not_found | :unauthorized | :validation_failed
+@type result :: {:ok, t()} | {:error, error_reason()}
+@type result(value) :: {:ok, value} | {:error, error_reason()}
+
+# Pagination
+@type page :: pos_integer()
+@type per_page :: pos_integer()
+@type paginated(item) :: %{
+  entries: [item],
+  page: page(),
+  per_page: per_page(),
+  total_entries: non_neg_integer(),
+  total_pages: non_neg_integer()
+}
+
+@spec list_users(page(), per_page()) :: paginated(User.t())
+
+# ID types — prevent mixing different entity IDs
+@type user_id :: pos_integer()
+@type post_id :: pos_integer()
+@type uuid :: String.t()
+
+# Callback/function types
+@type handler :: (Event.t() -> :ok | {:error, term()})
+@type transformer(input, output) :: (input -> output)
+```
+
+### Dialyzer False Positives and Suppression
+
+Dialyzer uses success typing which can produce false positives. Handle them carefully:
+
+**Common false positive scenarios:**
+
+1. **Dynamic dispatch** — Dialyzer can't follow `apply/3` or module variables
+2. **Protocol dispatch** — implementations added at runtime
+3. **Macro-generated code** — Dialyzer sees the expanded code, not the macro
+4. **Ecto query types** — `Repo.all(query)` returns `[term()]` to Dialyzer
+
+**Suppression (use sparingly):**
+
+```elixir
+# Suppress specific warning for a single function
+@dialyzer {:nowarn_function, my_function: 2}
+
+# Suppress specific warning type
+@dialyzer {:no_return, my_function: 1}        # "no local return" warning
+@dialyzer {:no_match, my_function: 3}         # "pattern can never match"
+@dialyzer {:no_unused, my_function: 0}        # "function never used"
+@dialyzer {:no_contracts, my_function: 1}     # "contract violation"
+
+# Suppress all warnings for a function (last resort)
+@dialyzer {:nowarn_function, [fun_a: 2, fun_b: 1]}
+
+# Module-level suppression (avoid — too broad)
+@dialyzer :no_return
+```
+
+**Better alternatives to suppression:**
+- Fix the spec to be more accurate (most common solution)
+- Add a guard or pattern match that Dialyzer can follow
+- Use `@spec` with broader types that match actual runtime behaviour
+- For protocol dispatch, spec the return as the protocol's declared type
+
+```elixir
+# BAD: Suppress because Dialyzer doesn't understand dynamic dispatch
+@dialyzer {:nowarn_function, dispatch: 2}
+def dispatch(module, event), do: apply(module, :handle, [event])
+
+# BETTER: Constrain the module type so Dialyzer can reason about it
+@spec dispatch(module(), Event.t()) :: :ok | {:error, term()}
+def dispatch(module, event) when is_atom(module), do: module.handle(event)
+```
+
+### Version Feature Summary
+
+| Feature | Version | Impact |
+|---------|---------|--------|
+| Pattern/guard type inference | 1.17 | Compiler warns on type mismatches in patterns |
+| Cross-clause pattern typing | 1.18 | Type narrows across function clauses |
+| Expanded expression checking | 1.19 | More operators and expressions type-checked |
+| Function body inference | 1.20 | Full inference without annotations |
+| Typed Map operations | 1.20 | `Map.put/delete/replace` tracked in types |
+| Redundant clause detection | 1.20 | Dead code warnings for unreachable clauses |
+| Cross-clause narrowing | 1.20 | `case`/`cond` branches narrow types |
+
+### Minimum Version Guidance
+
+When targeting older Elixir versions, know what type features are available:
+
+| If you target... | You get... | You miss... |
+|-------------------|-----------|-------------|
+| **1.17+** | Basic pattern/guard warnings, struct-aware typing | Cross-clause narrowing, Map tracking, redundant clause detection |
+| **1.18+** | + Cross-clause patterns, improved map/struct tracking | Function body inference, Map operation typing |
+| **1.19+** | + Expanded expression checking, better errors | Full function inference, redundant clause detection |
+| **1.20+** | Full type system — all features | Nothing (current) |
+
+**Practical impact:**
+- **1.17:** Catches obvious type errors in patterns (`case :ok do "string" -> ... end`)
+- **1.18:** Catches cross-clause issues (`def f(:a), do: 1; def f(:a), do: 2`)
+- **1.19:** Catches more expression-level errors (arithmetic, string ops on wrong types)
+- **1.20:** Catches function-level issues (return type mismatches, dead code, Map key tracking)
+
+**Recommendation:** Target **1.18+** minimum for meaningful type checking. The jump from 1.17 to 1.18 added cross-clause analysis which catches the most impactful bugs. 1.20 is ideal for new projects.
+
+## Related Files
+
+- **[SKILL.md](SKILL.md)** — Type system rules (7), key concepts, deep-dive link
+- **[documentation.md](documentation.md)** — @spec in documentation, @typedoc, ExDoc rendering of types
+- **[testing-reference.md](testing-reference.md)** — Testing type-related behaviour, StreamData for property testing
+- **[language-patterns.md](language-patterns.md)** — Pattern matching, guards, and how they feed type inference
+- **[debugging-profiling.md](debugging-profiling.md)** — Compiler warnings configuration, --warnings-as-errors
 
