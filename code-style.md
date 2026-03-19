@@ -880,6 +880,65 @@ assert readings != []
 assert length(readings) == 5
 ```
 
+**Case that just passes errors through (use `with` instead):**
+```elixir
+# BAD: case clause exists only to return the error unchanged
+case Native.some_call(args) do
+  {:ok, result} -> {:ok, transform(result)}
+  {:error, _} = err -> err
+end
+
+# GOOD: with handles error passthrough implicitly — non-matching results fall through
+with {:ok, result} <- Native.some_call(args) do
+  {:ok, transform(result)}
+end
+# If the function returns {:error, _}, it passes through automatically.
+# Use else only when you need to transform or differentiate errors.
+```
+
+**Identity case statement (redundant pattern match):**
+```elixir
+# BAD: every clause returns its own input — the case does nothing
+test_atom = case config.independence_test do
+  :par_corr -> :par_corr
+  :cmi_knn -> :cmi_knn
+end
+
+# GOOD: assign directly — validation happened at input boundary
+test_atom = config.independence_test
+
+# If you need runtime validation, use a guard or function clause:
+defp validate_test!(:par_corr), do: :par_corr
+defp validate_test!(:cmi_knn), do: :cmi_knn
+defp validate_test!(other), do: raise ArgumentError, "unknown test: #{inspect(other)}"
+```
+
+**Magic number defaults in structs (use module attributes):**
+```elixir
+# BAD: default repeated in struct definition and constructor
+defstruct [pc_alpha: 0.05, knn_k: 7]
+
+def new(opts \\ []) do
+  %__MODULE__{
+    pc_alpha: Keyword.get(opts, :pc_alpha, 0.05),  # duplicated!
+    knn_k: Keyword.get(opts, :knn_k, 7)            # duplicated!
+  }
+end
+
+# GOOD: module attribute is single source of truth
+@default_pc_alpha 0.05
+@default_knn_k 7
+
+defstruct [pc_alpha: @default_pc_alpha, knn_k: @default_knn_k]
+
+def new(opts \\ []) do
+  %__MODULE__{
+    pc_alpha: Keyword.get(opts, :pc_alpha, @default_pc_alpha),
+    knn_k: Keyword.get(opts, :knn_k, @default_knn_k)
+  }
+end
+```
+
 ## Related Files
 
 - **[SKILL.md](SKILL.md)** — Code style rules (12), key BAD/GOOD pairs, deep-dive link

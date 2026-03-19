@@ -17,7 +17,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 | [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction |
 | [quick-references.md](quick-references.md) | **LLM rules** (graphemes, atom safety, Enum.at, strftime) + **Elixir stdlib**: Enum (transform, filter, reduce, search, group, combine, access), Map (read, write, transform, pop, intersect), Keyword (read, write, split, validate), List (operations, tuple-list), String (split/join, trim/pad, search/test, transform, convert, **graphemes/codepoints/byte_size**, normalize), Regex, File/Path/System, URI/Base encoding, Date/Time (**Calendar.strftime**, **DateTime.shift**), IO/Inspect, Access/nested data, Process, Macro/Module (AST traversal), Range, Agent + **Erlang stdlib** (21 modules): :queue, :persistent_term, :atomics, :counters, :ets, :dets, :ordsets, :digraph, :gb_trees, :array, :math, :rand, :binary, :erlang, :lists, :timer, :crypto, :io_lib, :calendar, :unicode, :zlib, :os, :telemetry, :sys, :file + **JSON** (built-in 1.18+, Jason, safe JS interop) |
 | [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, comprehensions, function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, advanced patterns (pipeline, option registration, AST traversal, backoff) |
-| [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, **module organization order**, **function ordering**, **multi-clause formatting**, **string sigil selection**, **defdelegate guidance**, **idiomatic formatter readability**, readable code patterns (pipelines, guards, naming, conditionals), 9 BAD/GOOD pairs |
+| [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, **module organization order**, **function ordering**, **multi-clause formatting**, **string sigil selection**, **defdelegate guidance**, **idiomatic formatter readability**, readable code patterns (pipelines, guards, naming, conditionals), 12 BAD/GOOD pairs |
 | [documentation.md](documentation.md) | @moduledoc/@doc patterns, @spec/@type/@typedoc, @since/@deprecated, doctests (multi-line, exceptions, ellipsis), ExDoc config, cross-references |
 | [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), **binary/String.t/iodata decision table**, **@spec `when` clause**, **common @spec patterns** (GenServer, Phoenix, Plug, LiveView), @type best practices, defguard types, **Dialyzer setup**, compiler warnings with fixes, dynamic(), inference, roadmap |
 | [architecture-reference.md](architecture-reference.md) | Architecture layouts, Phoenix contexts, layered/pipeline architecture, production patterns, anti-patterns catalog |
@@ -1117,6 +1117,32 @@ with :ok <- validate(data),
      :ok <- authorize(user) do
   process(data)
 end
+
+# BAD: case that just passes errors through unchanged
+case Native.some_call(args) do
+  {:ok, result} -> {:ok, transform(result)}
+  {:error, _} = err -> err
+end
+# GOOD: with handles error passthrough implicitly
+with {:ok, result} <- Native.some_call(args) do
+  {:ok, transform(result)}
+end
+
+# BAD: identity case — returns its own input unchanged
+test_atom = case config.independence_test do
+  :par_corr -> :par_corr
+  :cmi_knn -> :cmi_knn
+end
+# GOOD: assign directly (validation happened earlier or use guard)
+test_atom = config.independence_test
+
+# BAD: magic number defaults scattered in struct and constructor
+defstruct [pc_alpha: 0.05, knn_k: 7]
+config = %__MODULE__{pc_alpha: Keyword.get(opts, :pc_alpha, 0.05)}
+# GOOD: module attribute = single source of truth
+@default_pc_alpha 0.05
+defstruct [pc_alpha: @default_pc_alpha]
+config = %__MODULE__{pc_alpha: Keyword.get(opts, :pc_alpha, @default_pc_alpha)}
 ```
 
 > **Deep dive:** [code-style.md](code-style.md) — .formatter.exs configuration (line_length, locals_without_parens,
