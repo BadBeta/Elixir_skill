@@ -1129,20 +1129,20 @@ with {:ok, result} <- Native.some_call(args) do
 end
 
 # BAD: identity case — returns its own input unchanged
-test_atom = case config.independence_test do
-  :par_corr -> :par_corr
-  :cmi_knn -> :cmi_knn
+mode = case config.mode do
+  :async -> :async
+  :sync -> :sync
 end
 # GOOD: assign directly (validation happened earlier or use guard)
-test_atom = config.independence_test
+mode = config.mode
 
 # BAD: magic number defaults scattered in struct and constructor
-defstruct [pc_alpha: 0.05, knn_k: 7]
-config = %__MODULE__{pc_alpha: Keyword.get(opts, :pc_alpha, 0.05)}
+defstruct [timeout: 5_000, max_retries: 3]
+config = %__MODULE__{timeout: Keyword.get(opts, :timeout, 5_000)}
 # GOOD: module attribute = single source of truth
-@default_pc_alpha 0.05
-defstruct [pc_alpha: @default_pc_alpha]
-config = %__MODULE__{pc_alpha: Keyword.get(opts, :pc_alpha, @default_pc_alpha)}
+@default_timeout 5_000
+defstruct [timeout: @default_timeout]
+config = %__MODULE__{timeout: Keyword.get(opts, :timeout, @default_timeout)}
 ```
 
 > **Deep dive:** [code-style.md](code-style.md) — .formatter.exs configuration (line_length, locals_without_parens,
