@@ -18,6 +18,7 @@
 | [Data Ownership](#data-ownership--consistency) | Cross-context transactions, idempotency, multi-tenancy |
 | [Inter-Context Communication](#inter-context-communication) | 6 mechanisms: direct → PubSub → GenStage → Oban → Commanded |
 | [Supervision as Architecture](#supervision-as-architecture) | Error kernel, strategies, stateful vs stateless processes |
+| [Process Design Patterns](#anti-pattern-simulating-objects-with-processes) | Object-with-process anti-pattern, instructions pattern, callback module pattern |
 | [Resilience Patterns](#resilience-patterns) | Bulkheads, circuit breaker, retry, degradation, timeouts |
 | [Pipeline Architecture](#pipeline-architecture) | Plug, GenStage, Broadway, Absinthe phases |
 | [Production Patterns](#production-patterns) | Telemetry, caching, NIF architecture |
@@ -43,7 +44,7 @@ These principles govern all structural decisions. When in doubt, refer back here
 
 5. **Error kernel design.** Stable processes hold critical state near the top of the tree. Volatile, crash-prone workers live below. If a worker crashes, critical state survives. Design for recovery, not prevention.
 
-6. **Pure core, impure shell.** GenServers delegate business logic to pure functions. The GenServer handles process mechanics (state, messages, lifecycle). Pure functions handle domain logic (calculations, validations, transformations). This makes domain logic testable without processes.
+6. **Pure core, impure shell.** GenServers delegate business logic to pure functions. The GenServer handles process mechanics (state, messages, lifecycle). Pure functions handle domain logic (calculations, validations, transformations). This makes domain logic testable without processes. For complex cases, use the [instructions pattern](#the-instructions-pattern--separating-domain-from-side-effects) — domain functions return instruction tuples, GenServer interprets them.
 
 7. **Each boundary module has one reason to change: its domain changes.** If a module changes because both business rules changed AND the database schema changed, it has too many responsibilities. Boundary modules are public API facades. Internal modules use `@moduledoc false`. Cross-boundary communication goes through public APIs, never through internal modules or direct Repo access.
 
@@ -1694,6 +1695,189 @@ end
 2. **Don't create GenServers for single-caller request/response** — that's just adding a bottleneck (serialised mailbox) for no benefit
 3. **Stateful processes need a recovery strategy** — what happens on crash? Reconstruct from DB? Accept empty state? Fetch from peer?
 4. **State ≠ cache** — if you're holding DB data in a GenServer just to avoid queries, use ETS or `:persistent_term` instead
+
+### Anti-Pattern: Simulating Objects with Processes
+
+A common mistake — especially from developers coming from OO languages — is using one Agent or GenServer per domain concept: an Agent for the shopping cart, an Agent for the inventory, an Agent for the order. This simulates objects with processes and brings only downsides:
+
+- **Process overhead** — each process costs memory (~2.6KB) and communication overhead (message copying)
+- **Forced synchronization** — concepts that are naturally sequential now require cross-process messaging to coordinate
+- **Complex cleanup** — crash of one "object process" requires terminating all related ones
+- **No benefit** — if the concepts are used together in a single flow, they share the same runtime concerns and gain nothing from isolation
+
+```elixir
+# BAD: One Agent per domain concept — simulating objects with processes
+cart_agent = Agent.start_link(fn -> Cart.new() end)
+inventory_agent = Agent.start_link(fn -> Inventory.new(products) end)
+# Now every operation requires cross-process messaging to coordinate
+Agent.update(cart_agent, fn cart ->
+  item = Agent.get(inventory_agent, fn inv -> Inventory.take(inv, sku) end)
+  Cart.add(cart, item)
+end)
+
+# GOOD: Pure functional abstractions — modules and functions, no processes
+cart = Cart.new()
+{:ok, item, inventory} = Inventory.take(inventory, sku)
+cart = Cart.add(cart, item)
+# Simple, testable, no overhead. Wrap in ONE GenServer only if needed for runtime concerns.
+```
+
+**The rule:** Use functions and modules to separate *thought concerns* (domain concepts that exist in your mental model). Use processes to separate *runtime concerns* (fault isolation, parallelism, independent lifecycles). If multiple concepts always change together in the same flow, they belong in the same process.
+
+**Decision test:** Ask "do these things need to fail independently? run in parallel? have different lifecycles?" If not, they belong together in one process (or no process at all), separated by modules and functions.
+
+### The Instructions Pattern — Separating Domain from Side Effects
+
+When domain logic needs to trigger side effects (notifications, messages, I/O), don't perform them inline. Instead, have pure domain functions return a list of **instructions** — data describing what should happen — and let the caller (GenServer, controller, test) interpret them.
+
+```elixir
+# Pure domain module — no side effects, no process mechanics
+defmodule MyApp.Workflow do
+  @opaque t :: %__MODULE__{}
+  defstruct [:state, :participants, instructions: []]
+
+  @spec advance(t(), participant_id(), action()) :: {[instruction()], t()}
+  def advance(workflow, participant_id, action) do
+    workflow
+    |> validate_participant(participant_id)
+    |> apply_action(action)
+    |> maybe_transition()
+    |> emit_instructions()
+  end
+
+  # Returns instructions like:
+  # [
+  #   {:notify, participant_id, {:status_changed, :approved}},
+  #   {:notify, reviewer_id, {:task_assigned, task}},
+  #   {:schedule, {:deadline, task_id}, :timer.hours(24)}
+  # ]
+
+  defp emit_instructions(%{instructions: instructions} = workflow) do
+    {Enum.reverse(instructions), %{workflow | instructions: []}}
+  end
+
+  # Internal helpers push instructions without performing them
+  defp notify(workflow, participant, event) do
+    %{workflow | instructions: [{:notify, participant, event} | workflow.instructions]}
+  end
+
+  defp schedule(workflow, event, delay) do
+    %{workflow | instructions: [{:schedule, event, delay} | workflow.instructions]}
+  end
+end
+```
+
+The GenServer interprets the instructions — this is where side effects happen:
+
+```elixir
+defmodule MyApp.WorkflowServer do
+  use GenServer
+
+  @impl true
+  def handle_call({:advance, participant_id, action}, _from, state) do
+    {instructions, workflow} = MyApp.Workflow.advance(state.workflow, participant_id, action)
+    new_state = %{state | workflow: workflow}
+    execute_instructions(instructions, state)
+    {:reply, :ok, new_state}
+  end
+
+  defp execute_instructions(instructions, state) do
+    Enum.each(instructions, fn
+      {:notify, participant_id, event} ->
+        # Send to the participant's notifier process
+        MyApp.Notifier.send(state.notifiers[participant_id], event)
+
+      {:schedule, event, delay} ->
+        Process.send_after(self(), {:scheduled, event}, delay)
+    end)
+  end
+end
+```
+
+**Benefits:**
+- **Domain logic is pure and trivially testable** — assert on returned instructions, no mocking needed
+- **Multiple drivers** — same domain module can be driven by a GenServer, a LiveView, a test, or an IEx session
+- **Temporal concerns stay out of domain** — retries, timeouts, delivery guarantees are the server's problem
+- **Domain can evolve independently** — adding new business rules doesn't touch notification/persistence code
+
+```elixir
+# Testing is dead simple — no processes, no mocking
+test "advancing workflow notifies next participant" do
+  workflow = Workflow.new([:alice, :bob])
+  {instructions, _workflow} = Workflow.advance(workflow, :alice, :approve)
+
+  assert {:notify, :bob, {:task_assigned, _}} = List.last(instructions)
+end
+```
+
+### Callback Module Pattern — Pluggable GenServer Behaviour
+
+When a GenServer needs to interact with different types of clients (HTTP, WebSocket, TCP, test harness), define a behaviour for the client-facing callbacks. The server invokes callback functions without knowing the transport:
+
+```elixir
+defmodule MyApp.SessionServer do
+  @callback on_event(callback_arg :: any(), participant_id(), event()) :: any()
+  @callback on_complete(callback_arg :: any(), participant_id(), result()) :: any()
+
+  use GenServer
+
+  def start_link(session_id, participants) do
+    # Each participant: %{id: id, callback_mod: module, callback_arg: any}
+    GenServer.start_link(__MODULE__, {session_id, participants}, name: via(session_id))
+  end
+
+  @impl true
+  def handle_call({:action, participant_id, action}, _from, state) do
+    {instructions, domain} = MyDomain.process(state.domain, participant_id, action)
+    new_state = %{state | domain: domain}
+    dispatch(instructions, state.participants)
+    {:reply, :ok, new_state}
+  end
+
+  defp dispatch(instructions, participants) do
+    Enum.each(instructions, fn {:notify, participant_id, event} ->
+      %{callback_mod: mod, callback_arg: arg} = Map.fetch!(participants, participant_id)
+      mod.on_event(arg, participant_id, event)
+    end)
+  end
+end
+```
+
+Now different transports implement the same behaviour:
+
+```elixir
+# Phoenix Channel transport
+defmodule MyApp.ChannelNotifier do
+  @behaviour MyApp.SessionServer
+
+  @impl true
+  def on_event(socket_pid, participant_id, event) do
+    send(socket_pid, {:push_event, participant_id, event})
+  end
+
+  @impl true
+  def on_complete(socket_pid, _participant_id, result) do
+    send(socket_pid, {:session_complete, result})
+  end
+end
+
+# Test transport — sends messages to test process
+defmodule MyApp.TestNotifier do
+  @behaviour MyApp.SessionServer
+
+  @impl true
+  def on_event(test_pid, participant_id, event) do
+    send(test_pid, {:event, participant_id, event})
+  end
+
+  @impl true
+  def on_complete(test_pid, _participant_id, result) do
+    send(test_pid, {:complete, result})
+  end
+end
+```
+
+**When to use:** Any GenServer that needs to push information to external clients over potentially different transports. The callback module pattern keeps the server transport-agnostic, testable without network, and extensible without modification.
 
 ## Resilience Patterns
 
