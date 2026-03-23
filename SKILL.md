@@ -762,6 +762,8 @@ client = Req.new(base_url: "https://api.example.com", auth: {:bearer, token}, re
 11. **PREFER DynamicSupervisor + Registry** over named GenServers for per-entity processes.
 12. **ALWAYS do atomic state updates.** Compute new state fully, then return.
 13. **ALWAYS implement `format_status/1`** on GenServers that hold sensitive data.
+14. **ALWAYS use the same naming mechanism to call a process as was used to register it.** A process registered via `{:via, Registry, {MyReg, id}}` will NOT be found by `GenServer.call(:id, msg)` — the error says "no process" even though the process is alive. Use the library's `via()` helper or the full via tuple.
+15. **ALWAYS use explicit timeouts for cross-GenServer calls during `handle_continue`** — the default 5000ms `GenServer.call` timeout is often too short for initialization chains. Ensure called processes are started earlier in the supervision tree.
 
 ### When to Use Which OTP Construct
 
@@ -856,6 +858,46 @@ end
 # Registry MUST start before DynamicSupervisor
 children = [MyApp.WorkerRegistry, MyApp.WorkerSupervisor]
 ```
+
+**Registry naming trap — BAD/GOOD:**
+
+```elixir
+# BAD: Calling a Registry-registered process by raw atom name
+# The process IS alive, but :my_worker doesn't resolve to it
+GenServer.call(:my_worker, :ping)
+# => ** (EXIT) no process associated with the given name
+
+# GOOD: Use the same via tuple the process registered with
+GenServer.call({:via, Registry, {MyApp.Registry, :my_worker}}, :ping)
+
+# BEST: Library provides a via() helper — always use it
+GenServer.call(MyApp.WorkerRegistry.via(:my_worker), :ping)
+```
+
+### Initialization Chains (handle_continue)
+
+When `handle_continue` calls other GenServers, consider ordering and timeouts:
+
+```elixir
+# BAD: handle_continue calls another GenServer with default 5s timeout
+def handle_continue(:setup, state) do
+  # If IndexServer is slow to start or in its own handle_continue, this times out
+  :ok = IndexServer.build(state.name)
+  {:noreply, %{state | ready: true}}
+end
+
+# GOOD: Explicit timeout + supervision ordering ensures the target is ready
+# 1. Ensure IndexServer starts BEFORE this process in the supervision tree
+# 2. Use explicit timeout for potentially slow cross-process operations
+def handle_continue(:setup, state) do
+  :ok = IndexServer.build(state.name, _timeout = 30_000)
+  {:noreply, %{state | ready: true}}
+end
+```
+
+> **Key:** If process A's `handle_continue` depends on process B, use `:rest_for_one` strategy
+> with B listed before A. Both processes may be in their own `handle_continue` simultaneously —
+> the call will block until B's callback completes.
 
 ### gen_statem (State Machines)
 
@@ -2559,6 +2601,8 @@ mix phx.gen.schema Blog.Post posts title:string body:text
 **When to use NIFs:** CPU-intensive operations >1 microsecond, wrapping existing C/Rust libraries, binary manipulation, tight compute loops. **When NOT to:** I/O-bound work, fault-tolerant processing, simple data transforms.
 
 **Decision:** Use **zigler** for Zig code or wrapping C libraries (best-in-class C integration). Use **rust-nif** for Rust code or wrapping C++ libraries (mature ecosystem, memory safety guarantees).
+
+**Consuming NIF libraries with OTP infrastructure:** When a NIF library brings its own supervision tree (Registry + DynamicSupervisor), you MUST: (1) ensure the library's application starts before your processes — list it in `extra_applications` or as a dependency, (2) use the library's `via()` helper or full `{:via, Registry, ...}` tuple to address its processes — raw atom names won't work (see Rule 14), (3) if your `handle_continue` calls into the library, ensure the library's supervision tree is fully started first via `:rest_for_one` or supervision ordering.
 
 ### Web Frameworks
 
