@@ -38,7 +38,7 @@ These principles govern all structural decisions. When in doubt, refer back here
 
 2. **Behaviours are ports. Implementations are adapters.** Every external dependency (database, API, email, file system, hardware) is behind a `@callback` behaviour defined by the domain. Config selects which implementation runs. This IS hexagonal architecture — Elixir has it built in. Note: Ecto itself follows this pattern — `Ecto.Adapter` is a behaviour, Postgres/MySQL/SQLite are adapters. The pattern is pervasive in the ecosystem.
 
-3. **Side effects belong in infrastructure, never in domain.** Boundary modules contain pure business logic. Side effects (HTTP calls, email, file I/O, database writes) live behind behaviours in the infrastructure layer, or are triggered via event-driven mechanisms (PubSub, GenStage, Broadway).
+3. **Side effects belong in infrastructure, never in domain** — the ideal. In practice, Phoenix contexts intentionally mix Repo calls into domain-adjacent modules (`mix phx.gen.context` generates this). Full separation (pure domain, Repo behind behaviours) is practiced in event-sourced systems (Commanded) but is not the norm for standard Phoenix CRUD apps. For non-Repo side effects (HTTP, email, file I/O), the behaviour boundary is consistently applied.
 
 4. **The supervision tree IS the architecture.** Start order = dependency order. Strategy encodes coupling. The tree is not just fault tolerance — it expresses which components depend on which, what restarts together, and what can fail independently.
 
