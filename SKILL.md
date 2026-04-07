@@ -74,7 +74,7 @@ Check this table BEFORE writing control flow or collection operations:
 | Handle malformed untrusted data | `rescue` (boundary only) | `case`/pattern match |
 | Process every element | `Enum.map(&fun/1)` | `Enum.map(fn x -> fun(x) end)` |
 | Filter a map by value | `for {k, v} <- map, pred` | `Map.values \|> Enum.filter` |
-| Build a map from enumerable | `Map.new(enum, &transform)` | `Enum.reduce` into `%{}` |
+| Build a map from enumerable | `Map.new/2` or `for ... into: %{}` | `Enum.reduce` into `%{}` |
 | Find in a list of tuples | `List.keyfind/keymember?` | `Enum.find(fn {x,_} -> ... end)` |
 | Check list non-empty | `[_ \| _] = list` or `match?` | `length(list) > 0` |
 | Accumulate with early stop | `Enum.reduce_while` | `Enum.reduce` with flag |
@@ -108,16 +108,24 @@ def handle(%Click{} = event), do: handle_click(event)
 def handle(event), do: handle_other(event)
 ```
 
-**2. `try/rescue` for GenServer.call → check first + catch :exit:**
+**2. `try/rescue` for GenServer.call → `catch :exit` (+ optional whereis):**
 ```elixir
-# BAD
+# BAD — rescue doesn't catch exits (GenServer.call raises exits, not exceptions)
 try do
   GenServer.call(pid, :status)
 rescue
   _ -> {:error, :down}
 end
 
-# GOOD — check first, catch :exit at boundary
+# GOOD — catch :exit handles process death (as LiveView, Oban, db_connection do)
+try do
+  GenServer.call(pid, :status)
+catch
+  :exit, _ -> {:error, :down}
+end
+
+# GOOD — whereis to skip optional calls + catch :exit for TOCTOU race
+# (Oban pattern: whereis AND catch, because process can die between check and call)
 case GenServer.whereis(name) do
   nil -> {:error, :not_running}
   pid ->
