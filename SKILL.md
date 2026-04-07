@@ -52,10 +52,10 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 13. **PREFER `Map.new/2` and `Enum.into/2`** over `Enum.reduce/3` when building maps or other collectables from lists.
 14. **USE `Enum.reduce_while/3`** for early-exit accumulation instead of throwing or using flags. Return `{:cont, acc}` or `{:halt, acc}`.
 15. **USE `map`, `reduce`, `filter`, or `for` to collect results.** Choose the right function for the transformation needed.
-16. **ALWAYS use `@impl true`** on every behaviour callback implementation. It catches typos and missing callbacks at compile time.
-17. **ALWAYS use `%{struct | key: val}`** for struct updates, NEVER `Map.put(struct, key, value)`. The update syntax raises on unknown keys, providing compile-time safety.
+16. **ALWAYS use `@impl`** on every behaviour callback implementation. Use `@impl true` or `@impl ModuleName` (Credo and community prefer the module name form for clarity, especially with multiple behaviours). It catches typos and missing callbacks at compile time.
+17. **ALWAYS use `%{struct | key: val}`** for struct updates, not `Map.put(struct, key, value)`. The update syntax raises on unknown keys, providing compile-time safety. Exception: `Map.put` is acceptable when the key is dynamic/computed at runtime.
 18. **ALWAYS distinguish between in-process validation and deferred external checks.** Validate data shape and rules immediately; defer uniqueness and referential checks to the database or external system. (In Ecto: `validate_*` runs immediately, `*_constraint` runs after DB write.)
-19. **PREFER `Task.async_stream` with `ordered: false`** for parallel independent work. Use `Stream.run()` when consuming only for side effects.
+19. **PREFER `Task.async_stream`** for parallel independent work. Use `ordered: false` only when result ordering doesn't matter (side-effect-heavy work like compilation, formatting). The default `ordered: true` is correct for most use cases. Use `Stream.run()` when consuming only for side effects.
 20. **ALWAYS put `@derive` before `defstruct`/`schema`.** NEVER implement a protocol `for: Map` expecting it to match structs — structs dispatch separately.
 
 ### Which Construct? — Decision Guide
