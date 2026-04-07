@@ -451,6 +451,15 @@ defmodule MyApp.Accounts.User do
   # Do NOT order aliases by "dependency" or "importance" — always alphabetize.
   # Grouped aliases ({A, B}) are sorted by the parent module name.
 
+  # Multi-source alias grouping: group aliases by parent module,
+  # then alphabetize the parent groups. Within a group, alphabetize.
+  alias MyApp.Accounts.{Organization, Team}  # "MyApp.Accounts" group
+  alias MyApp.Repo                            # "MyApp.Repo" group  
+  alias Phoenix.LiveView                      # "Phoenix" group
+
+  # Credo sorts by the FULL first segment: MyApp.Accounts < MyApp.Repo < Phoenix
+  # Within {braces}, sort alphabetically: {Organization, Team} not {Team, Organization}
+
   # 5. require — compile-time macros
   require Logger
 

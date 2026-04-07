@@ -1747,6 +1747,54 @@ plug OpenApiSpex.Plug.CastAndValidate, json_render_error_v2: true
 | Schema module not compiled | Ensure `require OpenApiSpex` before `OpenApiSpex.schema/1` |
 | Validation not running | Add `CastAndValidate` plug to pipeline |
 
+## Library Authoring Patterns
+
+For library authors (not web app authors), these patterns differ from Phoenix production patterns:
+
+### Supervision for Libraries
+
+```elixir
+# Libraries should provide an optional supervisor, not require one
+defmodule MyLib do
+  use Application
+
+  def start(_type, _args) do
+    children = [
+      {MyLib.Registry, []},
+      {MyLib.ConnectionPool, pool_config()}
+    ]
+    Supervisor.start_link(children, strategy: :rest_for_one, name: MyLib.Supervisor)
+  end
+
+  defp pool_config do
+    Application.get_env(:my_lib, :pool, [])
+  end
+end
+```
+
+### Precompiled NIFs with `rustler_precompiled`
+
+```elixir
+# mix.exs — support both precompiled and local compilation
+defp deps do
+  [
+    {:rustler, ">= 0.0.0", optional: true},
+    {:rustler_precompiled, "~> 0.8"}
+  ]
+end
+```
+
+### Library Telemetry Convention
+
+```elixir
+# Emit telemetry events with [:library_name, :operation] naming
+:telemetry.execute(
+  [:my_lib, :request, :stop],
+  %{duration: duration},
+  %{peer_id: peer_id, result: result}
+)
+```
+
 ## Related Files
 
 - **[SKILL.md](SKILL.md)** — Core Elixir rules, BAD/GOOD pairs, decision frameworks

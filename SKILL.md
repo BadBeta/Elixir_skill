@@ -745,6 +745,76 @@ client = Req.new(base_url: "https://api.example.com", auth: {:bearer, token}, re
 > built-in events table (Phoenix, Ecto, Oban, VM), metrics definitions (counter, sum, distribution, last_value),
 > HTTP client patterns (Req, Finch, middleware, retry), Req.Test mock/stub testing, reusable client construction.
 
+### Elixir as NIF Host
+
+When using Rust NIFs via Rustler, these Elixir-side patterns are critical:
+
+**Config-driven module swapping (test/prod):**
+```elixir
+# config/config.exs — default to real NIF
+config :my_app, native_module: MyApp.Native
+
+# config/test.exs — swap to mock
+config :my_app, native_module: MyApp.MockNative
+
+# In your context module — resolve at compile time
+defmodule MyApp.Node do
+  @native Application.compile_env!(:my_app, :native_module)
+
+  def start(config), do: @native.start(config)
+end
+```
+
+**`Application.compile_env` vs `Application.get_env`:**
+- `compile_env` — inlined at compile time, Dialyzer can see the concrete module. Use for module swapping where you want compile-time guarantees.
+- `get_env` — resolved at runtime. Use when the value might change or when compile-time resolution isn't needed.
+- **Dialyzer caveat:** `compile_env` gives Dialyzer the concrete module type, so specs are checked. `get_env` returns `term()`, losing type info.
+
+**Atom vs string keys across the NIF boundary:**
+```elixir
+# BAD: Elixir maps with atom keys sent to Rust NifMap
+config = %{host: "localhost", port: 4001}
+# Rust NifMap expects string keys by default — runtime crash!
+
+# GOOD: Convert atom keys to strings before crossing the NIF boundary
+config = %{"host" => "localhost", "port" => 4001}
+
+# GOOD: Or use a NifStruct with a matching Elixir struct
+config = %MyApp.Config{host: "localhost", port: 4001}
+```
+
+**Mock behaviour pattern for NIFs:**
+```elixir
+# Define a behaviour for the NIF interface
+defmodule MyApp.NativeBehaviour do
+  @callback start(map()) :: {:ok, reference()} | {:error, String.t()}
+  @callback stop(reference()) :: :ok
+end
+
+# Real implementation loads the NIF
+defmodule MyApp.Native do
+  @behaviour MyApp.NativeBehaviour
+  use Rustler, otp_app: :my_app, crate: "my_nif"
+
+  @impl true
+  def start(_config), do: :erlang.nif_error(:nif_not_loaded)
+  @impl true
+  def stop(_ref), do: :erlang.nif_error(:nif_not_loaded)
+end
+
+# Mock for testing
+defmodule MyApp.MockNative do
+  @behaviour MyApp.NativeBehaviour
+
+  @impl true
+  def start(_config), do: {:ok, make_ref()}
+  @impl true
+  def stop(_ref), do: :ok
+end
+```
+
+See the [rust-nif skill](../rust-nif/SKILL.md) for Rust-side NIF patterns and the return type matrix.
+
 ## OTP Patterns
 
 ### Rules for OTP Code (LLM)

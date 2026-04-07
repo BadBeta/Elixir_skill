@@ -72,6 +72,21 @@ def handle_continue(continue_arg, state) do
   # Same return values as handle_cast
 end
 
+# WARNING: Cross-process calls during handle_continue
+# When handle_continue calls OTHER GenServers, consider:
+# 1. The other process must be started BEFORE yours in the supervision tree
+# 2. Default GenServer.call timeout (5000ms) may be too short for initialization
+# 3. The other process might also be in its own handle_continue
+# 4. If the other process registers via Registry, use its via() helper (see below)
+#
+# Example: handle_continue that calls into a library's GenServer
+@impl true
+def handle_continue(:setup, state) do
+  # Use explicit timeout for potentially slow initialization operations
+  :ok = OtherServer.expensive_operation(via_tuple, _timeout = 30_000)
+  {:noreply, %{state | ready: true}}
+end
+
 # Cleanup (called on shutdown if trapping exits)
 @impl true
 def terminate(reason, state) do
@@ -307,6 +322,26 @@ GenServer.call({:via, Registry, {MyReg, id}}, :request)
 # Via PartitionSupervisor (load distribution)
 GenServer.call({:via, PartitionSupervisor, {MyPool, key}}, :request)
 ```
+
+### Registry Naming Mismatch Trap
+
+> **WARNING:** When a process registers via `{:via, Registry, ...}`, callers MUST use the same via tuple to address it. A raw atom name will NOT resolve to a Registry-registered process — the error message is misleading ("no process") even though the process is alive.
+
+```elixir
+# BAD: Calling a Registry-registered process by raw atom name
+# The process IS alive, but :my_worker doesn't resolve to it
+GenServer.call(:my_worker, :ping)
+# => ** (EXIT) no process associated with the given name
+
+# GOOD: Use the same via tuple the process registered with
+GenServer.call({:via, Registry, {MyApp.Registry, :my_worker}}, :ping)
+# => :pong
+
+# BEST: Library provides a via() helper — always use it
+GenServer.call(MyApp.Registry.via(:my_worker), :ping)
+```
+
+This is especially dangerous when consuming NIF libraries or third-party libraries that register processes via Registry internally. The library's `start_link/1` accepts the via tuple silently — there's no hint at the call site that callers must use the same tuple. Always check how a library registers its processes and use the same naming mechanism.
 
 ### Registry Comparison
 
