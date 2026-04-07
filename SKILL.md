@@ -58,6 +58,109 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 19. **PREFER `Task.async_stream` with `ordered: false`** for parallel independent work. Use `Stream.run()` when consuming only for side effects.
 20. **ALWAYS put `@derive` before `defstruct`/`schema`.** NEVER implement a protocol `for: Map` expecting it to match structs — structs dispatch separately.
 
+### Which Construct? — Decision Guide
+
+Check this table BEFORE writing control flow or collection operations:
+
+| When you need to... | Use this | NOT this |
+|---|---|---|
+| Branch on data shape/type | Multi-clause function | `if`/`case` |
+| Branch on ok/error from 1 operation | `case` | `with`, `if` |
+| Chain 2+ ok/error operations | `with` | nested `case` |
+| Branch on a simple boolean | `if` (no else needed) | `case true/false` |
+| Dispatch on struct type | Multi-clause function | `if is_struct(x, Mod)` |
+| Handle expected failure from call | `{:ok,_}/{:error,_}` tuples | `try/rescue` |
+| Handle exits from GenServer.call | `catch :exit` (boundary only) | `try/rescue` |
+| Handle malformed untrusted data | `rescue` (boundary only) | `case`/pattern match |
+| Process every element | `Enum.map(&fun/1)` | `Enum.map(fn x -> fun(x) end)` |
+| Filter a map by value | `for {k, v} <- map, pred` | `Map.values \|> Enum.filter` |
+| Build a map from enumerable | `Map.new(enum, &transform)` | `Enum.reduce` into `%{}` |
+| Find in a list of tuples | `List.keyfind/keymember?` | `Enum.find(fn {x,_} -> ... end)` |
+| Check list non-empty | `[_ \| _] = list` or `match?` | `length(list) > 0` |
+| Accumulate with early stop | `Enum.reduce_while` | `Enum.reduce` with flag |
+| Iterate with index | `Enum.with_index` | `for i <- 0..length-1` |
+| Build string from parts | IO list or interpolation | `<>` in a loop |
+| Update nested map | `put_in` / `update_in` | manual get + put |
+| Check if key exists in map | `Map.has_key?` or `match? %{k: _}` | `map[:k] != nil` |
+| Swap implementation for test/prod | `@callback` behaviour | `if Mix.env() == :test` |
+
+### try / catch / rescue Decision
+
+| Situation | Use |
+|---|---|
+| Can you check the condition BEFORE the call? | Check first (`Process.whereis`, `Map.fetch`) |
+| Calling a process you don't control? | `catch :exit` (GenServer.call to unknown PID) |
+| Input from an untrusted/external source? | `rescue` (e.g., `:erlang.binary_to_term` on network data) |
+| Error is an expected business case? | Return `{:ok,_}/{:error,_}` from the function |
+| Everything else? | Let it crash — supervisor handles it |
+
+### Top 5 Anti-Patterns (BAD/GOOD)
+
+**1. `if` for structural dispatch → multi-clause function:**
+```elixir
+# BAD
+def handle(event) do
+  if is_struct(event, Click), do: handle_click(event), else: handle_other(event)
+end
+
+# GOOD
+def handle(%Click{} = event), do: handle_click(event)
+def handle(event), do: handle_other(event)
+```
+
+**2. `try/rescue` for GenServer.call → check first + catch :exit:**
+```elixir
+# BAD
+try do
+  GenServer.call(pid, :status)
+rescue
+  _ -> {:error, :down}
+end
+
+# GOOD — check first, catch :exit at boundary
+case GenServer.whereis(name) do
+  nil -> {:error, :not_running}
+  pid ->
+    try do
+      GenServer.call(pid, :status)
+    catch
+      :exit, _ -> {:error, :down}
+    end
+end
+```
+
+**3. `Map.values |> Enum.filter` → `for` comprehension:**
+```elixir
+# BAD — builds intermediate list, then filters
+active = map |> Map.values() |> Enum.filter(& &1.active?)
+
+# GOOD — single pass with pattern match
+active = for {_k, %{active?: true} = v} <- map, do: v
+```
+
+**4. `Enum.map(fn x -> M.fun(x) end)` → capture:**
+```elixir
+# BAD — unnecessary anonymous function wrapper
+Enum.map(users, fn user -> User.name(user) end)
+
+# GOOD — function capture
+Enum.map(users, &User.name/1)
+```
+
+**5. `length(list) > 0` → pattern match:**
+```elixir
+# BAD — traverses entire list to count (O(n))
+if length(list) > 0, do: process(list)
+
+# GOOD — constant time check (O(1))
+case list do
+  [_ | _] -> process(list)
+  [] -> :empty
+end
+# Or with match? guard
+if match?([_ | _], list), do: process(list)
+```
+
 ### Thinking Functionally
 
 **Data In, Data Out** — Every function takes data and returns new data. No side effects, no mutation. Design each function as a pure transformation:
