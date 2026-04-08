@@ -14,9 +14,10 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 
 | File | Contents |
 |------|----------|
-| [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction |
-| [quick-references.md](quick-references.md) | **LLM rules** (graphemes, atom safety, Enum.at, strftime) + **Elixir stdlib**: Enum (transform, filter, reduce, search, group, combine, access), Map (read, write, transform, pop, intersect), Keyword (read, write, split, validate), List (operations, tuple-list), String (split/join, trim/pad, search/test, transform, convert, **graphemes/codepoints/byte_size**, normalize), Regex, File/Path/System, URI/Base encoding, Date/Time (**Calendar.strftime**, **DateTime.shift**), IO/Inspect, Access/nested data, Process, Macro/Module (AST traversal), Range, Agent + **Erlang stdlib** (21 modules): :queue, :persistent_term, :atomics, :counters, :ets, :dets, :ordsets, :digraph, :gb_trees, :array, :math, :rand, :binary, :erlang, :lists, :timer, :crypto, :io_lib, :calendar, :unicode, :zlib, :os, :telemetry, :sys, :file + **JSON** (built-in 1.18+, Jason, safe JS interop) |
-| [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, comprehensions, function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, advanced patterns (pipeline, option registration, AST traversal, backoff) |
+| [networking.md](networking.md) | **TCP/UDP socket programming**: gen_tcp/gen_udp API, **active vs passive mode** decision guide, listener/acceptor pattern, protocol framing (length-prefix, delimiter, TLV), buffer management, connection supervision, Thousand Island/Ranch, UDP broadcast/multicast, BAD/GOOD pairs |
+| [data-structures.md](data-structures.md) | Performance table, lists, maps, tuples, keywords, MapSet, ranges, :queue/:digraph/:ordsets, structs (constructors, pipelines, protocols, nesting), embedded schemas, binary matching + construction, **binary protocol patterns** (variable-length parsing, encode/decode round-trips, streaming buffer) |
+| [quick-references.md](quick-references.md) | **LLM rules** (graphemes, atom safety, Enum.at, strftime) + **Elixir stdlib**: Enum, Map, Keyword, List, String, Regex, File/Path/System, URI/Base, Date/Time, IO/Inspect, Access, Process, Macro/Module, Range, Agent + **Erlang stdlib** (21 modules): :queue, :persistent_term, :atomics, :counters, :ets, :dets, :ordsets, :digraph, :gb_trees, :array, :math, :rand, :binary, :erlang, :lists, :timer, **:crypto (ECDH, AEAD, signatures, hashing, HMAC, key derivation, decision table)**, :io_lib, :calendar, :unicode, :zlib, :os, :telemetry, :sys, :file + **JSON** |
+| [language-patterns.md](language-patterns.md) | Extended pattern matching, guards, case/cond, with, pipelines (tap/then/dbg), @enforce_keys, **comprehensions** (reduce:, into:, uniq:, binary), function captures, behaviours, protocols, streams/Enumerable/Collectable, error handling, **advanced reduce** (multi-accumulator, map_reduce, flat_map_reduce, reduce_while, scan), **functional state module pattern**, advanced patterns (pipeline, option registration, AST traversal, backoff) |
 | [code-style.md](code-style.md) | .formatter.exs config, migration options, Credo checks catalog, **module organization order**, **function ordering**, **multi-clause formatting**, **string sigil selection**, **defdelegate guidance**, **idiomatic formatter readability**, readable code patterns (pipelines, guards, naming, conditionals), 12 BAD/GOOD pairs |
 | [documentation.md](documentation.md) | @moduledoc/@doc patterns, @spec/@type/@typedoc, @since/@deprecated, doctests (multi-line, exceptions, ellipsis), ExDoc config, cross-references |
 | [type-system.md](type-system.md) | Set-theoretic types (1.17-1.20), **binary/String.t/iodata decision table**, **@spec `when` clause**, **common @spec patterns** (GenServer, Phoenix, Plug, LiveView), @type best practices, defguard types, **Dialyzer setup**, compiler warnings with fixes, dynamic(), inference, roadmap |
@@ -83,6 +84,8 @@ Check this table BEFORE writing control flow or collection operations:
 | Update nested map | `put_in` / `update_in` | manual get + put |
 | Check if key exists in map | `Map.has_key?` or `match? %{k: _}` | `map[:k] != nil` |
 | Swap implementation for test/prod | `@callback` behaviour | `if Mix.env() == :test` |
+| Expose module's function unchanged | `defdelegate` | copy-paste wrapper |
+| Check if map key exists (nil valid) | `Map.fetch/2` | `map[:key] != nil` |
 
 ### try / catch / rescue Decision
 
@@ -167,6 +170,19 @@ case list do
 end
 # Or with match? guard
 if match?([_ | _], list), do: process(list)
+```
+
+**6. `map[:key]` with nil check → `Map.fetch/2`:**
+```elixir
+# BAD — nil could mean "key absent" OR "value is nil"
+value = config[:timeout]
+if value != nil, do: use_timeout(value), else: use_default()
+
+# GOOD — distinguishes missing key from nil value
+case Map.fetch(config, :timeout) do
+  {:ok, timeout} -> use_timeout(timeout)
+  :error -> use_default()
+end
 ```
 
 ### Thinking Functionally
@@ -750,12 +766,34 @@ defmodule MyApp.Catalog do
   alias MyApp.Catalog.{Product, PriceCalculator}
 
   # --- Public API (the only functions other modules should call) ---
+
+  # defdelegate — pure pass-through, zero overhead, keeps context as clean facade
   defdelegate get_product!(id), to: Product, as: :fetch!
   defdelegate create_product(attrs), to: Product, as: :create
-  def calculate_price(product, qty), do: PriceCalculator.total(product, qty)
+
+  # Wrapper function — when you need added logic (logging, auth, transformation)
+  def calculate_price(product, qty) do
+    PriceCalculator.total(product, qty)
+    |> tap(&Logger.debug("Price calculated: #{&1}"))
+  end
 end
-# defdelegate compiles to a direct call — zero overhead, keeps context as clean facade
-# Use regular def when you need to wrap, transform args, or add logic
+```
+
+**`defdelegate` vs wrapper function:**
+
+```elixir
+# BAD — wrapper that just calls through (unnecessary indirection)
+def get_product!(id), do: Product.fetch!(id)
+
+# GOOD — defdelegate for pure pass-through
+defdelegate get_product!(id), to: Product, as: :fetch!
+
+# GOOD — wrapper when you need to add logic
+def create_product(attrs) do
+  attrs
+  |> Product.create()
+  |> tap(fn {:ok, p} -> broadcast({:product_created, p}); _ -> :ok end)
+end
 ```
 
 **Internal modules are private** — never call them from outside the context:
@@ -1196,6 +1234,32 @@ for pid <- Process.list(),
 > [otp-examples.md](otp-examples.md) — rate limiter, connection state machine, worker pool, cache, circuit breaker,
 > graceful shutdown, distribution patterns. [otp-advanced.md](otp-advanced.md) — GenStage, Flow, Broadway,
 > hot code upgrades.
+
+## TCP/UDP Networking (Key Patterns)
+
+For socket programming with `:gen_tcp` and `:gen_udp`. Use `active: :once` for production servers, `active: false` for clients.
+
+| Active mode | Data delivery | Backpressure | Use when |
+|---|---|---|---|
+| `{active, false}` | Manual `:gen_tcp.recv/2,3` | Full control | Clients, sequential protocols |
+| `{active, :once}` | One `{:tcp, socket, data}` then pauses | Per-message | **Most production servers** |
+| `{active, N}` | N messages then `{:tcp_passive, socket}` | Batched | High throughput (OTP 17+) |
+| `{active, true}` | Unlimited messages | **NONE** | Trusted LAN, benchmarks |
+
+```elixir
+# active: :once pattern — re-arm after each message
+def handle_info({:tcp, socket, data}, state) do
+  state = process_data(data, state)
+  :inet.setopts(socket, active: :once)    # Re-arm for next message
+  {:noreply, state}
+end
+def handle_info({:tcp_closed, _socket}, state), do: {:stop, :normal, state}
+def handle_info({:tcp_error, _socket, reason}, state), do: {:stop, reason, state}
+```
+
+> **Deep dive:** [networking.md](networking.md) — gen_tcp/gen_udp API reference, listener/acceptor patterns,
+> protocol framing (length-prefix, delimiter, TLV), buffer management, connection supervision,
+> UDP broadcast/multicast, Thousand Island/Ranch, BAD/GOOD pairs.
 
 ## Code Organization
 
@@ -2294,7 +2358,18 @@ q = :queue.new() |> :queue.in(:a) |> :queue.in(:b)
 :ets.new(:cache, [:named_table, :public, read_concurrency: true])
 :ets.insert(:cache, {key, value, System.monotonic_time()})
 :ets.lookup(:cache, key)  # [{key, value, timestamp}]
+
+# :crypto — most common operations (OTP 24+)
+:crypto.strong_rand_bytes(32)                   # Secure random bytes
+:crypto.hash(:sha256, data)                     # SHA-256 hash
+:crypto.mac(:hmac, :sha256, key, message)       # HMAC-SHA256
+{ct, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, plain, aad, true)  # AEAD encrypt
+{pub, priv} = :crypto.generate_key(:ecdh, :x25519)  # ECDH keypair
 ```
+
+> **Deep dive:** [quick-references.md](quick-references.md) — full :crypto reference with ECDH key exchange,
+> AEAD encryption/decryption (AES-GCM, ChaCha20-Poly1305), Ed25519 signatures, HKDF key derivation,
+> hash algorithm table, key/nonce/tag size requirements, common pitfalls, decision table.
 
 > **Deep dive:** [quick-references.md](quick-references.md) — :queue (in_r, out_r, peek, to_list, O(n) warnings),
 > :persistent_term (erase, info, hydration pattern), :atomics (CAS, lock-free rate limiting),

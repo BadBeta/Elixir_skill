@@ -731,6 +731,238 @@ end
 - Need lazy evaluation (`Stream`)
 - Readability with named pipeline steps
 
+### More `reduce:` Patterns
+
+```elixir
+# reduce: with struct accumulator — event sourcing style
+for event <- events, reduce: %OrderState{} do
+  state -> OrderState.apply(state, event)
+end
+
+# Nested generators with reduce — build adjacency list
+for {from, tos} <- edge_list, to <- tos, reduce: %{} do
+  acc -> Map.update(acc, from, [to], &[to | &1])
+end
+
+# Counting with pattern filter — only count matching elements
+for %{status: :active} <- users, reduce: 0 do
+  count -> count + 1
+end
+
+# Recursive key-value transform with into: (from Plug SnakeCaseParams)
+defp convert(params) when is_map(params) do
+  for {key, value} <- params, into: %{}, do: {Macro.underscore(key), convert(value)}
+end
+defp convert(params) when is_list(params), do: for(value <- params, do: convert(value))
+defp convert(value), do: value
+```
+
+## Advanced Reduce Patterns
+
+Production patterns from Ecto, Phoenix LiveView, and Plug.
+
+**Multi-accumulator reduce** — process a collection while tracking multiple concerns:
+
+```elixir
+# Tuple accumulator — partition in a single pass (from Ecto changeset)
+{changes, errors, valid?} =
+  Enum.reduce(new_changes, {old_changes, [], true}, fn
+    {key, value}, {changes, errors, valid?} ->
+      case validate(key, value) do
+        :ok -> {Map.put(changes, key, value), errors, valid?}
+        {:error, msg} -> {changes, [{key, msg} | errors], false}
+      end
+  end)
+
+# Simpler example — separate odds and evens
+{evens, odds} = Enum.reduce(numbers, {[], []}, fn n, {e, o} ->
+  if rem(n, 2) == 0, do: {[n | e], o}, else: {e, [n | o]}
+end)
+# Note: prefer Enum.split_with/2 for this specific case
+```
+
+**`Enum.reduce_while/3` with complex state** — validation with error accumulation, halt on fatal:
+
+```elixir
+# Validate config keys against allowed set — halt on first unknown key
+Enum.reduce_while(config, :ok, fn {key, _value}, :ok ->
+  if key in allowed_keys,
+    do: {:cont, :ok},
+    else: {:halt, {:error, {:unknown_key, key}}}
+end)
+
+# Process items with budget — stop when budget exhausted
+Enum.reduce_while(items, {[], budget}, fn item, {processed, remaining} ->
+  cost = compute_cost(item)
+  if cost <= remaining do
+    {:cont, {[process(item) | processed], remaining - cost}}
+  else
+    {:halt, {Enum.reverse(processed), remaining}}
+  end
+end)
+```
+
+**`Enum.map_reduce/3`** — transform elements while threading an accumulator (from Ecto query builder):
+
+```elixir
+# Transform list while accumulating parameters (from Ecto.Query.Builder)
+{escaped_exprs, params_acc} =
+  Enum.map_reduce(expressions, params_acc, fn expr, params ->
+    {escaped, new_params} = escape(expr, type, params, vars, env)
+    {escaped, new_params}
+  end)
+
+# Assign sequential IDs while transforming
+{items_with_ids, next_id} =
+  Enum.map_reduce(items, 1, fn item, id ->
+    {Map.put(item, :id, id), id + 1}
+  end)
+
+# Build indexed output while tracking state
+{lines, _line_num} =
+  Enum.map_reduce(paragraphs, 1, fn para, line ->
+    formatted = "#{line}: #{para}"
+    {formatted, line + String.length(para)}
+  end)
+```
+
+**`Enum.flat_map_reduce/3`** — emit 0..N results per element while threading state (from Phoenix LiveView):
+
+```elixir
+# Delete components while accumulating state changes
+{deleted_cids, new_state} =
+  Enum.flat_map_reduce(cids, state, fn cid, acc ->
+    {deleted, components} = delete_component(cid, acc.components)
+    {deleted, %{acc | components: components}}
+  end)
+```
+
+**Building maps/keyword lists with reduce** — pipeline assembly (from Plug.Builder):
+
+```elixir
+# Build nested AST by reducing over plug pipeline
+ast = Enum.reduce(pipeline, conn_var, fn {plug, opts, guards}, acc ->
+  quote_plug({plug, opts, guards}, acc)
+end)
+
+# Build keyword list conditionally
+opts = Enum.reduce([timeout: t, retries: r, verbose: v], [], fn
+  {_key, nil}, acc -> acc          # Skip nil values
+  {key, value}, acc -> [{key, value} | acc]
+end)
+```
+
+**`Enum.scan/3`** — like reduce but emits every intermediate accumulator value:
+
+```elixir
+# Running totals
+Enum.scan([10, 20, 30, 40], 0, &(&1 + &2))
+#=> [10, 30, 60, 100]
+
+# State evolution tracking — useful for debugging event-sourced systems
+states = Enum.scan(events, initial_state, &apply_event/2)
+# => [state_after_event_1, state_after_event_2, ...]
+```
+
+> **Note:** `Enum.scan` is rarely used in production Elixir — most code needs only the
+> final result (`Enum.reduce`) or uses streams for lazy intermediate values (`Stream.scan`).
+
+## Functional State Module Pattern
+
+Pure struct module that encapsulates domain logic, embedded as GenServer state. The "functional core, imperative shell" pattern — domain logic in pure functions, I/O and process management in GenServer.
+
+Pattern sources: Commanded aggregates, Kevin Hoffman's "Functional Core" pattern, Tyler Young's GenServer testability article.
+
+```elixir
+# Functional core — pure module, no process, no side effects
+defmodule MyApp.Router do
+  @moduledoc false
+  defstruct peers: %{}, routes: %{}
+
+  @type t :: %__MODULE__{}
+
+  def new, do: %__MODULE__{}
+
+  def add_peer(%__MODULE__{} = router, peer_id, conn_pid) do
+    route = %{via: :direct, conn_pid: conn_pid, hops: 0}
+    %{router | peers: Map.put(router.peers, peer_id, route)}
+  end
+
+  def remove_peer(%__MODULE__{} = router, peer_id) do
+    # Pure transformation — returns new router, no side effects
+    peers = Map.delete(router.peers, peer_id)
+    # Also remove routes that go through this peer
+    routes = Map.reject(router.routes, fn {_dest, route} -> route.via == peer_id end)
+    %{router | peers: peers, routes: routes}
+  end
+
+  def find_route(%__MODULE__{} = router, destination) do
+    case Map.fetch(router.routes, destination) do
+      {:ok, route} -> {:ok, route}
+      :error -> {:error, :no_route}
+    end
+  end
+end
+
+# Imperative shell — GenServer holds the struct, handles I/O
+defmodule MyApp.Node do
+  use GenServer
+
+  defstruct [:router, :listener]
+
+  @impl true
+  def init(opts) do
+    # Domain state is a field in GenServer state
+    {:ok, %__MODULE__{router: MyApp.Router.new()}}
+  end
+
+  @impl true
+  def handle_info({:peer_connected, peer_id, conn_pid}, state) do
+    # Delegate domain logic to pure function
+    router = MyApp.Router.add_peer(state.router, peer_id, conn_pid)
+    {:noreply, %{state | router: router}}
+  end
+
+  def handle_info({:peer_disconnected, peer_id}, state) do
+    router = MyApp.Router.remove_peer(state.router, peer_id)
+    {:noreply, %{state | router: router}}
+  end
+end
+```
+
+**Testing advantage — no process setup needed for domain logic:**
+
+```elixir
+# Test the functional core directly — fast, deterministic, no async
+test "remove_peer cascades to routes" do
+  router =
+    Router.new()
+    |> Router.add_peer("A", self())
+    |> Router.add_peer("B", self())
+    |> Router.remove_peer("A")
+
+  assert map_size(router.peers) == 1
+  refute Map.has_key?(router.peers, "A")
+end
+
+# GenServer test only verifies wiring — thin layer
+test "node handles peer disconnect" do
+  {:ok, pid} = GenServer.start_link(MyApp.Node, [])
+  send(pid, {:peer_connected, "A", self()})
+  send(pid, {:peer_disconnected, "A"})
+  # Assert on GenServer state if needed
+end
+```
+
+**When to use this pattern:**
+- Domain logic is complex enough to benefit from isolated testing
+- Multiple GenServers need the same domain logic (share the struct module)
+- You want to separate "what happens" (pure) from "when/where it happens" (process)
+
+**When NOT to use:**
+- Simple GenServer with trivial state — just put the logic in callbacks
+- State transformations are one-liners — the indirection isn't worth it
+
 ## Syntax Equivalences — Why Elixir Code Looks Different
 
 Elixir has three syntax features that combine to make the same code look very different depending on style. All forms below produce **identical AST** — the compiler sees no difference.

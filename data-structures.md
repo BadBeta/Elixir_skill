@@ -866,3 +866,146 @@ for <<byte <- binary>>, into: <<>>, do: <<byte + 1>>
 # Binary comprehension — extract all 16-bit integers
 for <<value::16 <- binary>>, do: value
 ```
+
+### Binary Protocol Patterns
+
+Patterns for implementing binary wire protocols — parsing, encoding, framing, and buffer management.
+Pattern sources: Mint (HTTP/2 frame decoder), Tortoise (MQTT), ExRTP (RTP packets).
+
+**Variable-length field parsing** — bind a size value and use it later in the same pattern:
+
+```elixir
+# Length-prefixed field — len bound first, used in binary-size(len)
+# This is a documented Erlang feature: size can reference earlier bindings
+def decode(<<len::16, payload::binary-size(len), rest::binary>>) do
+  {:ok, payload, rest}
+end
+def decode(_incomplete), do: :more
+
+# Multiple variable-length fields (from ExRTP extension parsing)
+defp decode_field(<<id::8, len::8, data::binary-size(len), rest::binary>>, acc) do
+  decode_field(rest, [{id, data} | acc])
+end
+defp decode_field(<<>>, acc), do: {:ok, Enum.reverse(acc)}
+defp decode_field(_incomplete, _acc), do: :more
+
+# Arithmetic in size expression (OTP 23+ — size can be a guard expression)
+# From ExRTP: CSRC count * 4 bytes per CSRC
+def decode_rtp(<<
+  _version::2, _padding::1, _extension::1, csrc_count::4,
+  _marker::1, payload_type::7, seq::16, timestamp::32, ssrc::32,
+  csrc::binary-size(csrc_count * 4),
+  payload::binary
+>>) do
+  {:ok, %{payload_type: payload_type, seq: seq, timestamp: timestamp, payload: payload}}
+end
+```
+
+**Recursive binary decode with accumulator** — parse multiple records from a buffer:
+
+```elixir
+# TLV (Type-Length-Value) parser — universal pattern for tagged binary formats
+defmodule TLV do
+  def parse(binary, acc \\ [])
+
+  def parse(<<type::8, length::16, value::binary-size(length), rest::binary>>, acc) do
+    parse(rest, [{type, value} | acc])
+  end
+
+  def parse(<<>>, acc), do: {:ok, Enum.reverse(acc)}
+  def parse(remaining, acc) when byte_size(remaining) > 0, do: {:partial, Enum.reverse(acc), remaining}
+end
+
+# Multi-clause type dispatch (from Tortoise MQTT packet decoder)
+# Top bits of first byte identify the packet type
+def decode(<<1::4, _::4, rest::binary>>), do: decode_connect(rest)
+def decode(<<2::4, _::4, rest::binary>>), do: decode_connack(rest)
+def decode(<<3::4, _::4, rest::binary>>), do: decode_publish(rest)
+```
+
+**Encode/decode round-trip pattern** — the standard interface for protocol modules:
+
+```elixir
+defmodule MyProtocol.Frame do
+  defstruct [:type, :flags, :payload]
+
+  @type t :: %__MODULE__{type: 0..255, flags: 0..255, payload: binary()}
+
+  @doc "Encode a frame struct to wire format (length-prefixed)."
+  @spec encode(t()) :: iodata()
+  def encode(%__MODULE__{} = frame) do
+    payload_size = byte_size(frame.payload)
+    # Return IO list — no copy, can pass directly to :gen_tcp.send
+    [<<frame.type::8, frame.flags::8, payload_size::16>>, frame.payload]
+  end
+
+  @doc "Decode a frame from binary. Returns {:ok, frame, rest} or :more."
+  @spec decode(binary()) :: {:ok, t(), binary()} | :more | {:error, term()}
+  def decode(<<type::8, flags::8, length::16, payload::binary-size(length), rest::binary>>) do
+    {:ok, %__MODULE__{type: type, flags: flags, payload: payload}, rest}
+  end
+  def decode(data) when byte_size(data) < 4, do: :more
+  def decode(<<_type::8, _flags::8, length::16, rest::binary>>)
+      when byte_size(rest) < length, do: :more
+
+  @doc "Parse all complete frames from a buffer."
+  @spec parse_all(binary()) :: {[t()], binary()}
+  def parse_all(buffer, acc \\ []) do
+    case decode(buffer) do
+      {:ok, frame, rest} -> parse_all(rest, [frame | acc])
+      :more -> {Enum.reverse(acc), buffer}
+    end
+  end
+end
+```
+
+**Return convention for streaming parsers** (verified across Mint, Tortoise, Redix, ExRTP):
+
+| Return | Meaning | Used by |
+|--------|---------|---------|
+| `{:ok, parsed, rest}` | Complete parse, more data in buffer | Mint HTTP/2 frame decoder |
+| `:more` | Incomplete data, need more bytes | Mint HTTP/1 and HTTP/2 |
+| `{:error, reason}` | Parse error, protocol violation | Mint, ExRTP |
+| `{:continuation, fun}` | Closure captures parse state | Redix (alternative to buffer) |
+
+**Buffer management in GenServer state** — accumulate partial TCP reads:
+
+```elixir
+# Standard pattern from Mint: buffer in struct, concat + parse + store remainder
+defstruct [:socket, buffer: <<>>]
+
+def handle_info({:tcp, socket, new_data}, %{socket: socket} = state) do
+  buffer = state.buffer <> new_data
+  {frames, remaining} = MyProtocol.Frame.parse_all(buffer)
+  state = Enum.reduce(frames, %{state | buffer: remaining}, &process_frame/2)
+  :inet.setopts(socket, active: :once)
+  {:noreply, state}
+end
+
+# For high-throughput: IO list accumulation avoids binary copying
+# Only flatten when parsing
+defstruct [:socket, buffer_parts: []]
+
+def handle_info({:tcp, socket, new_data}, state) do
+  buffer = [state.buffer_parts, new_data] |> IO.iodata_to_binary()
+  {frames, remaining} = MyProtocol.Frame.parse_all(buffer)
+  state = %{state | buffer_parts: [remaining]}
+  # ...
+end
+```
+
+**IO lists vs binary for protocol construction:**
+
+```elixir
+# Use IO lists when building incrementally or sending to socket
+# :gen_tcp.send/2 accepts IO lists directly — no need to flatten
+frame = [<<type::8, byte_size(payload)::16>>, payload]
+:gen_tcp.send(socket, frame)    # Zero-copy send
+
+# Use binary concatenation for small, fixed-size headers
+header = <<magic::32, version::8, flags::8>>
+packet = <<header::binary, body::binary>>
+```
+
+> **Deep dive:** [networking.md](networking.md) — TCP/UDP socket programming, active vs passive modes,
+> listener/acceptor patterns, protocol framing, buffer management in GenServer state, Thousand Island/Ranch.

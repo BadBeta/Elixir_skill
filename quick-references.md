@@ -1382,21 +1382,165 @@ Use when you need Erlang-level performance or functions not exposed by Elixir:
 :timer.apply_after(5000, Module, :function, [args])
 ```
 
-### :crypto - Cryptographic Operations
+### :crypto - Cryptographic Operations (OTP 24+)
+
+> **API note:** OTP 24 replaced the old API (`block_encrypt`, `hmac`, `stream_init`, etc.) with
+> the new unified API below. Old function names were removed. Cipher naming changed from
+> `aes_cbc128` to `aes_128_cbc` (standardized `ALGORITHM_KEYSIZE_MODE`).
 
 ```elixir
 # Secure random bytes (for tokens, IDs, secrets)
 :crypto.strong_rand_bytes(16)                    # 16 random bytes
 :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)  # Hex token
 :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)  # URL-safe token
-
-# Hashing
-:crypto.hash(:sha256, "data")                    # SHA-256 digest
-:crypto.hash(:md5, content)                      # MD5 (non-security use)
-
-# HMAC (message authentication)
-:crypto.mac(:hmac, :sha256, key, message)        # HMAC-SHA256
 ```
+
+**Hashing** — `hash(type, data) :: binary()`
+
+```elixir
+:crypto.hash(:sha256, "data")                    # SHA-256 digest (32 bytes)
+:crypto.hash(:sha3_256, "data")                  # SHA3-256 digest (32 bytes)
+:crypto.hash(:blake2b, "data")                   # BLAKE2b digest (64 bytes)
+```
+
+| Hash atom | Algorithm | Output bytes | Use |
+|-----------|-----------|-------------|-----|
+| `:sha256` | SHA-256 | 32 | General purpose, most common |
+| `:sha384` | SHA-384 | 48 | Higher security margin |
+| `:sha512` | SHA-512 | 64 | High security |
+| `:sha3_256` | SHA3-256 | 32 | Post-quantum safe, NIST |
+| `:sha3_512` | SHA3-512 | 64 | Post-quantum, max security |
+| `:blake2b` | BLAKE2b | 64 | Fastest secure hash |
+| `:blake2s` | BLAKE2s | 32 | Fast on 32-bit platforms |
+| `:md5` | MD5 | 16 | Checksums only — NOT security |
+
+Check runtime support: `:crypto.supports(:hashs)`
+
+**HMAC** — `mac(type, sub_type, key, data) :: binary()`
+
+```elixir
+:crypto.mac(:hmac, :sha256, key, message)        # HMAC-SHA256 (32 bytes)
+:crypto.mac(:hmac, :sha512, key, message)        # HMAC-SHA512 (64 bytes)
+:crypto.mac(:poly1305, :poly1305, key_32, data)  # Poly1305 (key must be 32 bytes)
+```
+
+**ECDH Key Exchange** — Diffie-Hellman key agreement over elliptic curves
+
+```elixir
+# Generate keypair — returns {public_key, private_key} as binaries
+{my_pub, my_priv} = :crypto.generate_key(:ecdh, :x25519)     # 32-byte keys
+{my_pub, my_priv} = :crypto.generate_key(:ecdh, :x448)       # 56-byte keys
+{my_pub, my_priv} = :crypto.generate_key(:ecdh, :secp256r1)  # NIST P-256
+
+# Compute shared secret — both sides derive the same value
+shared = :crypto.compute_key(:ecdh, others_pub, my_priv, :x25519)  # 32-byte shared secret
+```
+
+| Curve atom | Key size | Shared secret | Use |
+|-----------|----------|---------------|-----|
+| `:x25519` | 32 B | 32 B | Modern default — fast, safe, widely supported |
+| `:x448` | 56 B | 56 B | Higher security margin (~224-bit) |
+| `:secp256r1` | 32 B | 32 B | NIST P-256, FIPS compliant, TLS standard |
+| `:secp256k1` | 32 B | 32 B | Bitcoin/Ethereum, NOT recommended for new designs |
+
+Check runtime support: `:crypto.supports(:curves)`
+
+**AEAD Encryption** — Authenticated Encryption with Associated Data
+
+```elixir
+# Encrypt — returns {ciphertext, tag}
+key   = :crypto.strong_rand_bytes(32)   # 32 bytes for AES-256-GCM / ChaCha20
+nonce = :crypto.strong_rand_bytes(12)   # 12 bytes (ALWAYS use 12)
+aad   = "associated data"               # Authenticated but not encrypted
+
+{ciphertext, tag} = :crypto.crypto_one_time_aead(
+  :aes_256_gcm, key, nonce, "plaintext", aad, true
+)
+
+# Decrypt — returns plaintext or the atom :error on auth failure
+plaintext = :crypto.crypto_one_time_aead(
+  :aes_256_gcm, key, nonce, ciphertext, aad, tag, false
+)
+# => "plaintext" or :error (NOT {:error, reason})
+```
+
+| AEAD cipher | Key | Nonce | Tag | Notes |
+|-------------|-----|-------|-----|-------|
+| `:aes_128_gcm` | 16 B | 12 B | 16 B | FIPS approved |
+| `:aes_256_gcm` | 32 B | 12 B | 16 B | FIPS approved, recommended |
+| `:chacha20_poly1305` | 32 B | 12 B | 16 B | Fast on platforms without AES-NI, RFC 8439 |
+
+**CRITICAL:** Never reuse a nonce with the same key — completely breaks confidentiality and authentication.
+**CRITICAL:** Nonce MUST be exactly 12 bytes. Non-12-byte IVs for GCM reduce security (triggers internal GHASH).
+**CRITICAL:** Decrypt returns the **atom** `:error` on failure, not `{:error, reason}`. Pattern match accordingly.
+
+**Digital Signatures** — Ed25519 (EdDSA)
+
+```elixir
+# Generate signing keypair
+{pub, priv} = :crypto.generate_key(:eddsa, :ed25519)   # 32 B pub, 32 B priv
+
+# Sign — key argument is a LIST: [private_key, curve]
+signature = :crypto.sign(:eddsa, :none, "message", [priv, :ed25519])   # 64-byte signature
+
+# Verify — key argument is a LIST: [public_key, curve]
+true = :crypto.verify(:eddsa, :none, "message", signature, [pub, :ed25519])
+```
+
+**CRITICAL:** DigestType MUST be `:none` for EdDSA — Ed25519 handles hashing internally (SHA-512).
+Using `:sha512` will fail.
+
+**CRITICAL:** Key argument is a **list** `[key, :ed25519]`, NOT a tuple. Using `{key, curve}` will fail.
+
+| Signature algorithm | Type atom | Digest | Key format |
+|---|---|---|---|
+| Ed25519 | `:eddsa` | `:none` | `[key, :ed25519]` |
+| Ed448 | `:eddsa` | `:none` | `[key, :ed448]` |
+| ECDSA P-256 | `:ecdsa` | `:sha256` | `[key, :secp256r1]` |
+
+**Key Derivation (HKDF)** — Not built into `:crypto`, implement via HMAC (RFC 5869)
+
+```elixir
+defmodule HKDF do
+  @doc "Extract a pseudorandom key from input keying material."
+  def extract(hash \\ :sha256, ikm, salt) do
+    :crypto.mac(:hmac, hash, salt, ikm)
+  end
+
+  @doc "Expand pseudorandom key to desired length."
+  def expand(hash \\ :sha256, prk, info, length) do
+    hash_len = byte_size(:crypto.hash(hash, ""))
+    n = ceil(length / hash_len)
+
+    {okm, _} =
+      Enum.reduce(1..n, {<<>>, <<>>}, fn i, {acc, prev} ->
+        t = :crypto.mac(:hmac, hash, prk, <<prev::binary, info::binary, i::8>>)
+        {<<acc::binary, t::binary>>, t}
+      end)
+
+    binary_part(okm, 0, length)
+  end
+end
+
+# Usage: derive encryption key from shared secret
+prk = HKDF.extract(:sha256, shared_secret, salt)
+encryption_key = HKDF.expand(:sha256, prk, "encryption", 32)
+```
+
+**Which :crypto function?**
+
+| Need | Function | Returns |
+|------|----------|---------|
+| Random bytes | `strong_rand_bytes/1` | `binary()` |
+| Hash data | `hash/2` | `binary()` |
+| Authenticate message | `mac/4` (`:hmac`) | `binary()` |
+| Encrypt + authenticate | `crypto_one_time_aead/6` | `{ciphertext, tag}` |
+| Decrypt + verify | `crypto_one_time_aead/7` | `plaintext \| :error` |
+| Key agreement (DH) | `generate_key/2` + `compute_key/4` | `{pub, priv}`, `binary()` |
+| Sign data | `sign/4` | `binary()` |
+| Verify signature | `verify/5` | `boolean()` |
+| Derive subkeys | Manual HKDF via `mac/4` | `binary()` |
+| Password hashing | `crypto:pbkdf2_hmac/5` (OTP 24+) | `binary()` |
 
 ### :io_lib - Erlang Format Strings
 

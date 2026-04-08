@@ -618,6 +618,22 @@ end
 
 **Rule:** Use `defdelegate` when the function is a pure pass-through. Use a wrapper function when you need any additional logic.
 
+**defdelegate decision table:**
+
+| Scenario | Use defdelegate? | Why |
+|----------|:---:|-----|
+| Pure pass-through to internal module | YES | Zero overhead, clean facade |
+| Facade context (Phoenix contexts) | YES | Keeps context as routing layer |
+| Delegating to Erlang module | YES | `Map` delegates 6 functions to `:maps` |
+| Need to rename for better API | YES | Use `as:` option |
+| Need to add logging/telemetry | NO | Wrapper — defdelegate can't add logic |
+| Need to transform args or return value | NO | Wrapper — defdelegate passes args as-is |
+| Need authorization before calling | NO | Wrapper — may need it later |
+| Need different @doc than target | NO | defdelegate copies the target's @doc |
+| Internal private helper | NO | Just call the function directly |
+
+**Real-world precedent:** Elixir's `Map` module delegates `keys/1`, `values/1`, `merge/2`, `to_list/1`, `from_keys/2`, `intersect/2` to Erlang's `:maps`. Elixir's `String` delegates `split/1`, `trim_leading/1`, `trim_trailing/1` to `String.Break`. Phoenix contexts use defdelegate to route to query/command submodules.
+
 #### Idiomatic Readability Within Formatter Rules
 
 The formatter handles layout, but you control structure. These patterns produce cleaner formatted output:

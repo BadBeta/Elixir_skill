@@ -712,6 +712,108 @@ defmodule OrderQueue do
 end
 ```
 
+### Raw Process Patterns (spawn_link, send, receive)
+
+The foundation that GenServer, Task, and supervision are built on. Use raw processes when:
+- GenServer is too heavy (simple fire-and-forget loops)
+- Task is unavailable (AtomVM, minimal BEAM targets)
+- You need a long-running linked loop (accept loops, handler loops)
+
+**spawn_link + receive loop with state:**
+
+```elixir
+# Long-running process with state — the raw equivalent of GenServer
+defp worker_loop(state) do
+  receive do
+    {:work, data, reply_to} ->
+      result = process(data)
+      send(reply_to, {:result, result})
+      worker_loop(state)
+
+    {:update_config, new_config} ->
+      worker_loop(%{state | config: new_config})
+
+    :stop ->
+      :ok   # Exit normally — linked processes are NOT killed on :normal exit
+  after
+    30_000 ->
+      do_periodic_work(state)
+      worker_loop(state)
+  end
+end
+
+# Start from GenServer
+me = self()
+pid = spawn_link(fn -> worker_loop(%{parent: me, config: opts}) end)
+```
+
+**Reporting back to parent via send:**
+
+```elixir
+# Child process reports events to parent GenServer
+defp accept_loop(listen_socket, parent) do
+  case :gen_tcp.accept(listen_socket) do
+    {:ok, socket} ->
+      send(parent, {:new_connection, socket})
+      accept_loop(listen_socket, parent)
+    {:error, :closed} ->
+      send(parent, :listener_closed)
+  end
+end
+
+# Parent handles in handle_info
+def handle_info({:new_connection, socket}, state), do: ...
+def handle_info(:listener_closed, state), do: {:stop, :normal, state}
+```
+
+**Crash propagation — what happens when a linked process dies:**
+
+```elixir
+# Without trap_exit: linked process crash kills the parent too
+pid = spawn_link(fn -> raise "boom" end)
+# Parent receives EXIT signal → also crashes (unless supervised)
+
+# With trap_exit: EXIT signals become messages
+Process.flag(:trap_exit, true)
+pid = spawn_link(fn -> raise "boom" end)
+# Parent receives {:EXIT, pid, {%RuntimeError{}, stacktrace}} as a message
+
+# trap_exit in GenServer — handle linked process death gracefully
+@impl true
+def init(opts) do
+  Process.flag(:trap_exit, true)
+  pid = spawn_link(fn -> some_loop() end)
+  {:ok, %{worker: pid}}
+end
+
+@impl true
+def handle_info({:EXIT, pid, reason}, %{worker: pid} = state) do
+  Logger.warning("Worker died: #{inspect(reason)}")
+  new_pid = spawn_link(fn -> some_loop() end)   # Restart manually
+  {:noreply, %{state | worker: new_pid}}
+end
+```
+
+**Exit reason classification:**
+
+| Reason | Meaning | Linked process behavior |
+|--------|---------|------------------------|
+| `:normal` | Clean exit | Link does NOT propagate (unless trapping) |
+| `:shutdown` | Orderly shutdown | Propagates, treated as expected shutdown |
+| `{:shutdown, term}` | Shutdown with info | Propagates, not logged by default |
+| Any other term | Abnormal exit | Propagates, kills linked processes, logged |
+
+**When to use raw processes vs GenServer vs Task:**
+
+| Situation | Use | Why |
+|-----------|-----|-----|
+| Stateful request/response | GenServer | Client API, timeouts, supervision |
+| One-off parallel work | Task | Automatic linking, await/yield, async_stream |
+| Simple long-running loop | `spawn_link` + `receive` | Less overhead, no GenServer state machine |
+| AtomVM / minimal BEAM | `spawn_link` + `receive` | Task may not be available |
+| Accept loops, handler loops | `spawn_link` from GenServer | Expendable child, parent traps exits |
+| Fire-and-forget side effect | `spawn` (no link) | Crash doesn't affect parent |
+
 ### Links vs Monitors
 
 ```elixir
