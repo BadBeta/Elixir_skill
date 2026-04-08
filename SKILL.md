@@ -977,7 +977,7 @@ See the [rust-nif skill](../rust-nif/SKILL.md) for Rust-side NIF patterns and th
 7. **NEVER store large data (>100KB) in process state.** Use ETS for large/shared data.
 8. **ALWAYS set explicit timeouts** on `GenServer.call`.
 9. **PREFER Registry over `:global`** for process discovery within a single node.
-10. **NEVER catch `:exit` from GenServer.call** in business logic — let supervision handle failures.
+10. **PREFER letting supervision handle GenServer failures** over catching `:exit` in business logic. Use `catch :exit` only at system boundaries — calling processes you don't own, optional services, or network dispatch (as LiveView, Oban, and db_connection do). See the `catch :exit` pattern in section 2 above.
 11. **PREFER DynamicSupervisor + Registry** over named GenServers for per-entity processes.
 12. **ALWAYS do atomic state updates.** Compute new state fully, then return.
 13. **ALWAYS implement `format_status/1`** on GenServers that hold sensitive data.
