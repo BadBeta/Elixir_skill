@@ -1009,3 +1009,87 @@ packet = <<header::binary, body::binary>>
 
 > **Deep dive:** [networking.md](networking.md) — TCP/UDP socket programming, active vs passive modes,
 > listener/acceptor patterns, protocol framing, buffer management in GenServer state, Thousand Island/Ranch.
+
+## Erlang `:queue` — O(1) Double-Ended Queue
+
+Lists are O(1) prepend but O(n) append. When you need efficient both-end operations (request queues, resource pools, message buffers), use Erlang's `:queue` module. NimblePool uses `:queue` for both its resource pool and client request queue.
+
+### Core Operations
+
+```elixir
+# Create
+q = :queue.new()
+
+# Add to back (enqueue) — O(1) amortized
+q = :queue.in(:item1, q)
+q = :queue.in(:item2, q)
+q = :queue.in(:item3, q)
+
+# Remove from front (dequeue) — O(1) amortized
+{{:value, :item1}, q} = :queue.out(q)
+# Returns :empty when queue is empty
+:empty = :queue.out(:queue.new())
+
+# Add to front (priority insert)
+q = :queue.in_r(:urgent, q)
+
+# Remove from back
+{{:value, last}, q} = :queue.out_r(q)
+
+# Peek without removing
+{:value, front} = :queue.peek(q)
+{:value, back} = :queue.peek_r(q)
+
+# Check state
+:queue.is_empty(q)      # true/false
+:queue.len(q)           # length (O(n) — cache if needed)
+
+# Convert
+:queue.to_list(q)       # [front, ..., back]
+:queue.from_list([1, 2, 3])
+
+# Join two queues — O(n) in length of second queue
+combined = :queue.join(q1, q2)
+```
+
+### When to Use `:queue` vs List
+
+| Operation | List | `:queue` |
+|---|---|---|
+| Prepend (stack push) | O(1) | O(1) |
+| Append (enqueue) | O(n) | **O(1) amortized** |
+| Pop front (dequeue) | O(1) | **O(1) amortized** |
+| Pop back | O(n) | **O(1) amortized** |
+| Random access | O(n) | O(n) |
+| Pattern match head | `[h \| t]` | Not supported |
+| Enum/Stream compat | Native | `:queue.to_list/1` first |
+
+**Use `:queue` when:** FIFO ordering matters AND both enqueue and dequeue are frequent (request queues, worker pools, message buffers, breadth-first traversal).
+
+**Use lists when:** You only prepend/pop from one end (stacks), need pattern matching (`[h | t]`), or work with Enum/Stream functions.
+
+### GenServer Pattern with `:queue`
+
+```elixir
+defmodule RequestQueue do
+  use GenServer
+
+  def init(_) do
+    {:ok, %{queue: :queue.new(), pending: 0}}
+  end
+
+  def handle_call(:enqueue, from, %{queue: q} = state) do
+    {:noreply, %{state | queue: :queue.in(from, q)}}
+  end
+
+  def handle_info(:process_next, %{queue: q} = state) do
+    case :queue.out(q) do
+      {{:value, from}, q} ->
+        GenServer.reply(from, :ok)
+        {:noreply, %{state | queue: q}}
+      {:empty, _q} ->
+        {:noreply, state}
+    end
+  end
+end
+```

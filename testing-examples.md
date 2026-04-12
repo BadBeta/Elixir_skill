@@ -1532,3 +1532,76 @@ test "returns error when email already taken" do
   assert %{email: ["has already been taken"]} = errors_on(changeset)
 end
 ```
+
+## How Mox Process Ownership Works (`$callers`)
+
+Understanding how Mox tracks which test process "owns" expectations is important for debugging failures in spawned processes.
+
+### Automatic Ownership via `$callers`
+
+When you use `Task.async/1` or `Task.Supervisor.async/2`, Elixir automatically sets `$callers` in the spawned process's dictionary. Mox walks this chain to find the owning test process:
+
+```elixir
+# In your test (pid: #PID<0.100.0>)
+expect(CalcMock, :add, fn x, y -> x + y end)
+
+# Task.async sets $callers = [#PID<0.100.0>] in the spawned process
+task = Task.async(fn ->
+  CalcMock.add(1, 2)  # Works! Mox walks $callers to find test process
+end)
+Task.await(task)
+```
+
+### When `$callers` Doesn't Work
+
+Processes started with bare `spawn`, `GenServer.start_link`, or `:proc_lib` do NOT set `$callers`. You must explicitly allow:
+
+```elixir
+test "GenServer uses mock" do
+  expect(CalcMock, :add, fn x, y -> x + y end)
+
+  # This GenServer won't have $callers — must allow explicitly
+  {:ok, pid} = MyWorker.start_link([])
+  allow(CalcMock, self(), pid)
+
+  # Now the GenServer can use CalcMock
+  assert MyWorker.compute(pid, 1, 2) == 3
+end
+```
+
+### Lazy Allow for Dynamic PIDs
+
+When the PID isn't known at allow time (e.g., process started inside the code under test):
+
+```elixir
+test "allows dynamically spawned process" do
+  # Function is called lazily when the mock is dispatched
+  allow(CalcMock, self(), fn -> GenServer.whereis(MyWorker) end)
+
+  start_supervised!(MyWorker)
+  assert MyWorker.compute(1, 2) == 3
+end
+```
+
+### Global Mode for Non-Concurrent Tests
+
+When ownership tracking is too complex (many processes, supervision trees):
+
+```elixir
+setup :set_mox_global  # All processes share expectations
+setup :verify_on_exit!
+
+# Cannot use async: true with global mode
+```
+
+### Pipe-Chainable Mox API
+
+Mox returns the mock module from mutation functions, enabling chaining:
+
+```elixir
+CalcMock
+|> expect(:add, fn x, y -> x + y end)
+|> expect(:mult, 2, fn x, y -> x * y end)  # expect 2 calls
+|> stub(:divide, fn _, 0 -> {:error, :div_by_zero}; x, y -> {:ok, x / y} end)
+|> allow(self(), worker_pid)
+```

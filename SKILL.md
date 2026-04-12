@@ -39,9 +39,9 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 ### Rules for Writing Elixir (LLM)
 
 1. **NEVER use if/else for structural dispatch.** Use multi-clause functions with pattern matching. Only use `if` for simple single-condition boolean checks with no alternative branches.
-2. **NEVER use try/rescue for expected failures.** Use `{:ok, _}/{:error, _}` tuples with `case` or `with`. Reserve try/rescue for truly unexpected exceptions at system boundaries.
+2. **NEVER use try/rescue for expected failures.** Use `{:ok, _}/{:error, _}` tuples with `case` or `with`. Reserve try/rescue for truly unexpected exceptions at system boundaries. Exception: `raise ArgumentError` is appropriate for invalid configuration at startup — these are programmer errors, not runtime failures (NimblePool, NimbleOptions pattern).
 3. **NEVER write imperative loops.** Elixir has no for/while loops with mutable state. Use `Enum.map/2`, `Enum.filter/2`, `Enum.reduce/3`, or `for` comprehensions.
-4. **ALWAYS design functions for pipe-ability.** The subject (primary data) goes as the first argument. Return the transformed data.
+4. **ALWAYS design functions for pipe-ability.** The subject (primary data) goes as the first argument. Return the transformed data. For mutation/configuration APIs, return the subject itself to enable chaining (Mox pattern: `MockMod |> expect(:fun, &impl/1) |> allow(self(), pid)`).
 5. **PREFER pattern matching in function heads** over `case` in the body when dispatching on argument shape or type.
 6. **PREFER Enum functions over manual recursion** for collection processing. Use recursion only for early termination, tree/graph traversal, or complex multi-accumulator state. Use `Stream` for infinite/lazy sequences.
 7. **NEVER reassign to accumulate.** Rebinding a variable inside `Enum.each/2` does NOT mutate the outer variable. Use `Enum.reduce/3` or `Enum.map/2` to collect results.
@@ -53,7 +53,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 13. **PREFER `Map.new/2` and `Enum.into/2`** over `Enum.reduce/3` when building maps or other collectables from lists.
 14. **USE `Enum.reduce_while/3`** for early-exit accumulation instead of throwing or using flags. Return `{:cont, acc}` or `{:halt, acc}`.
 15. **USE `map`, `reduce`, `filter`, or `for` to collect results.** Choose the right function for the transformation needed.
-16. **ALWAYS use `@impl`** on every behaviour callback implementation. Use `@impl true` or `@impl ModuleName` (Credo and community prefer the module name form for clarity, especially with multiple behaviours). It catches typos and missing callbacks at compile time.
+16. **ALWAYS use `@impl`** on every behaviour callback implementation. Both `@impl true` and `@impl ModuleName` are idiomatic — NimblePool and NimbleOptions use `@impl true`, Quantum uses `@impl GenStage`. Use the module name form when implementing multiple behaviours to disambiguate. It catches typos and missing callbacks at compile time.
 17. **ALWAYS use `%{struct | key: val}`** for struct updates, not `Map.put(struct, key, value)`. The update syntax raises on unknown keys, providing compile-time safety. Exception: `Map.put` is acceptable when the key is dynamic/computed at runtime.
 18. **ALWAYS distinguish between in-process validation and deferred external checks.** Validate data shape and rules immediately; defer uniqueness and referential checks to the database or external system. (In Ecto: `validate_*` runs immediately, `*_constraint` runs after DB write.)
 19. **PREFER `Task.async_stream`** for parallel independent work. Use `ordered: false` only when result ordering doesn't matter (side-effect-heavy work like compilation, formatting). The default `ordered: true` is correct for most use cases. Use `Stream.run()` when consuming only for side effects.
@@ -973,7 +973,7 @@ See the [rust-nif skill](../rust-nif/SKILL.md) for Rust-side NIF patterns and th
 3. **ALWAYS provide a client API** wrapping GenServer calls/casts.
 4. **PREFER call over cast.** Use cast only for fire-and-forget where losing messages is acceptable.
 5. **NEVER block GenServer callbacks** with I/O, HTTP, or DB queries. Offload to `Task` or use `handle_continue`.
-6. **ALWAYS use `{:continue, _}` for post-init work** instead of crashing `init/1`.
+6. **PREFER `{:continue, _}` for post-init work** over crashing `init/1`. Exception: use `send(self(), :init_work)` when client messages should interleave with initialization (pool/cache pattern — NimblePool does this so the pool stays responsive during worker creation).
 7. **NEVER store large data (>100KB) in process state.** Use ETS for large/shared data.
 8. **ALWAYS set explicit timeouts** on `GenServer.call`.
 9. **PREFER Registry over `:global`** for process discovery within a single node.

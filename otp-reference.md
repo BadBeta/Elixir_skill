@@ -1065,6 +1065,147 @@ ref = :atomics.new(1, [])
 :atomics.compare_exchange(ref, 1, expected, desired)
 ```
 
+## `send(self(), ...)` vs `handle_continue` — Deferred Work Decision
+
+Both patterns defer work after `init/1` returns, but they have different semantics:
+
+| Pattern | Behavior | Use When |
+|---|---|---|
+| `{:ok, state, {:continue, :init}}` | Runs **before** any other message | Init must complete before serving requests |
+| `send(self(), :init_work)` | Goes through **mailbox** — interleaved with other messages | Server should accept requests during init |
+
+### handle_continue (default choice)
+
+```elixir
+def init(opts) do
+  {:ok, %{data: nil}, {:continue, :load_data}}
+end
+
+@impl true
+def handle_continue(:load_data, state) do
+  data = expensive_load()
+  {:noreply, %{state | data: data}}
+end
+# No messages processed until handle_continue completes
+```
+
+### send(self(), ...) — Pool/Cache Pattern (NimblePool)
+
+```elixir
+def init(opts) do
+  send(self(), {__MODULE__, :init_worker})
+  {:ok, %{workers: [], pending: :queue.new()}}
+end
+
+@impl true
+def handle_info({__MODULE__, :init_worker}, state) do
+  # Initialize one worker, then schedule next
+  worker = create_worker()
+  send(self(), {__MODULE__, :init_worker})
+  {:noreply, %{state | workers: [worker | state.workers]}}
+end
+
+# Client requests are served between worker initializations:
+@impl true
+def handle_call(:checkout, from, state) do
+  # Can serve from already-initialized workers while more are starting
+  {:reply, hd(state.workers), state}
+end
+```
+
+**NimblePool uses self-sends** because a pool should serve checkouts as soon as *any* worker is ready, not wait for *all* workers to initialize.
+
+## Process Monitor Lifecycle Pattern
+
+The complete monitor/demonitor pattern with `:flush` (NimblePool pattern):
+
+```elixir
+# 1. Monitor client on checkout
+mon_ref = Process.monitor(client_pid)
+state = put_in(state.monitors[mon_ref], request_ref)
+
+# 2. Handle client crash — clean up resources
+@impl true
+def handle_info({:DOWN, mon_ref, :process, _pid, _reason}, state) do
+  case Map.pop(state.monitors, mon_ref) do
+    {nil, _} -> {:noreply, state}  # Unknown monitor
+    {request_ref, monitors} ->
+      # Return resource to pool, clean up request
+      {:noreply, %{state | monitors: monitors} |> return_resource(request_ref)}
+  end
+end
+
+# 3. Demonitor on successful checkin — ALWAYS use [:flush]
+Process.demonitor(mon_ref, [:flush])
+state = Map.delete(state.monitors, mon_ref)
+```
+
+**Why `[:flush]`:** Without it, a `:DOWN` message that was already in the mailbox before `demonitor` will still be processed, causing double-cleanup or crashes. The `:flush` option removes any pending `:DOWN` message for that reference.
+
+## Deadline-Based Timeouts (NimblePool Pattern)
+
+Convert relative timeouts to absolute monotonic deadlines to avoid serving stale requests:
+
+```elixir
+defp deadline(timeout) when is_integer(timeout) do
+  System.monotonic_time() + System.convert_time_unit(timeout, :millisecond, :native)
+end
+
+defp past_deadline?(deadline) do
+  System.monotonic_time() > deadline
+end
+
+# In handle_call — attach deadline to queued request
+def handle_call({:checkout, timeout}, from, state) do
+  {:noreply, enqueue(state, from, deadline(timeout))}
+end
+
+# When serving from queue — check if request is still fresh
+defp serve_next(%{queue: q} = state) do
+  case :queue.out(q) do
+    {{:value, {from, deadline}}, q} ->
+      if past_deadline?(deadline) do
+        # Client already timed out — skip, try next
+        serve_next(%{state | queue: q})
+      else
+        GenServer.reply(from, {:ok, resource})
+        %{state | queue: q}
+      end
+    {:empty, _} -> state
+  end
+end
+```
+
+**Why not just use GenServer.call timeout?** The default timeout only raises on the *caller* side. The server still processes the request and wastes a resource on a client that has already given up. Deadlines let the server skip stale requests.
+
+## `:rest_for_one` with Pipeline Processes (Quantum Pattern)
+
+When processes form a pipeline (producer → consumer chain), use `:rest_for_one` so that crashing a producer restarts all downstream consumers (whose subscriptions are now invalid):
+
+```elixir
+# Quantum's supervision tree — 8 processes in pipeline order
+children = [
+  {Task.Supervisor, name: MyApp.TaskSupervisor},  # 1. Independent infra
+  {Storage, storage_opts},                          # 2. Persistence
+  {ClockBroadcaster, clock_opts},                   # 3. Producer: ticks
+  {TaskRegistry, registry_opts},                    # 4. Overlap tracking
+  {JobBroadcaster, job_opts},                       # 5. Producer: job CRUD
+  {ExecutionBroadcaster, exec_opts},                # 6. Consumer+Producer: scheduling
+  {NodeSelectorBroadcaster, node_opts},             # 7. Consumer+Producer: node selection
+  {ExecutorSupervisor, executor_opts}               # 8. Consumer: runs tasks
+]
+
+Supervisor.init(children, strategy: :rest_for_one)
+# If ClockBroadcaster (3) crashes, processes 4-8 restart too
+# If Storage (2) crashes, processes 3-8 restart
+# ExecutorSupervisor (8) crashing doesn't affect anything upstream
+```
+
+**When to use `:rest_for_one`:**
+- GenStage/Broadway-style pipelines where downstream subscribes to upstream
+- Process chains where later processes depend on earlier ones' state
+- NOT for independent processes (use `:one_for_one`) or tightly-coupled pairs (use `:one_for_all`)
+
 ## Related Files
 
 - **[SKILL.md](SKILL.md)** — OTP rules, GenServer/gen_statem key patterns, supervisor strategies, decision frameworks

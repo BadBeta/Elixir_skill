@@ -2399,3 +2399,90 @@ defmodule MyApp.Backoff do
   end
 end
 ```
+
+## `throw`/`catch` for Local Early-Exit (NimbleOptions Pattern)
+
+While `try/rescue` is for exceptions and `{:ok, _}/{:error, _}` tuples are for expected failures, `throw`/`catch` has a legitimate use as a **local control flow mechanism** for early exit inside comprehensions or reduces where threading error state is awkward.
+
+```elixir
+# Problem: validating a list inside a for comprehension
+# Can't "break" out of a comprehension on first error
+def validate_list(items, schema) do
+  try do
+    values =
+      for {item, index} <- Enum.with_index(items) do
+        case validate_item(item, schema) do
+          {:ok, value} -> value
+          {:error, error} -> throw({:error, %{error | keys_path: [index | error.keys_path]}})
+        end
+      end
+    {:ok, values}
+  catch
+    {:error, _} = error -> error
+  end
+end
+```
+
+**When this is appropriate:**
+- Inside `for` comprehensions where early exit on first error is needed
+- Inside `Enum.reduce` where threading `{:halt, {:error, reason}}` would complicate the accumulator
+- Scope must be local — `throw` and `catch` in the same function or a direct helper
+- The NimbleOptions library uses this pattern for list/tuple element validation
+
+**When NOT to use:**
+- Across module boundaries (use ok/error tuples)
+- For expected business failures (use ok/error tuples)
+- For truly exceptional situations (use raise/rescue)
+
+## `Module.create/3` — Runtime Module Generation (Mox Pattern)
+
+`defmodule` creates modules at compile time. `Module.create/3` creates them at runtime, essential for test frameworks, code generators, and dynamic protocol adapters.
+
+```elixir
+# Mox generates mock modules at runtime from behaviour definitions
+defp create_mock(name, behaviours) do
+  funs = for behaviour <- behaviours,
+             {fun, arity} <- behaviour.behaviour_info(:callbacks) do
+    args = Enum.map(1..arity//1, &Macro.var(:"arg#{&1}", Elixir))
+
+    quote do
+      def unquote(fun)(unquote_splicing(args)) do
+        Mox.__dispatch__(__MODULE__, unquote(fun), unquote(arity), unquote(args))
+      end
+    end
+  end
+
+  body = quote do
+    @behaviour unquote(hd(behaviours))
+    unquote_splicing(funs)
+  end
+
+  Module.create(name, body, Macro.Env.location(__ENV__))
+end
+
+# Usage in test_helper.exs:
+Mox.defmock(CalcMock, for: Calculator)
+# CalcMock now exists as a module at runtime
+```
+
+**When to use `Module.create/3`:**
+- Test helpers that generate mock/stub modules (Mox)
+- Code generators that need to create modules from runtime data
+- Dynamic protocol implementations
+
+## `@compile {:no_warn_undefined, [...]}` — Optional Dependencies
+
+Suppress warnings for modules that may not exist at compile time (runtime-only modules, optional deps):
+
+```elixir
+# Suppress warning for mock modules that only exist at runtime
+@compile {:no_warn_undefined, [CalcMock, StorageMock]}
+
+# Suppress for optional dependency functions
+@compile {:no_warn_undefined, {SomeOptionalLib, :function, 2}}
+```
+
+**When to use:**
+- Test files referencing mock modules created by `Mox.defmock/2`
+- Libraries with optional dependencies checked via `Code.ensure_loaded?/1`
+- NOT as a general silencer — only for genuinely optional/runtime modules

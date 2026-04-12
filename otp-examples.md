@@ -2930,9 +2930,101 @@ children = [
 ]
 ```
 
+## Dedicated State/Opts Structs for GenServer (Quantum Pattern)
+
+For non-trivial GenServers, separate configuration from runtime state using companion struct modules. Quantum uses this consistently for every GenStage process:
+
+```
+lib/my_app/
+├── job_scheduler.ex              # GenServer implementation
+├── job_scheduler/
+│   ├── state.ex                  # Runtime state struct
+│   ├── start_opts.ex             # start_link argument struct
+│   └── init_opts.ex              # init/1 argument struct (derived from start_opts)
+```
+
+### StartOpts — What start_link receives
+
+```elixir
+defmodule MyApp.JobScheduler.StartOpts do
+  @moduledoc false
+
+  @enforce_keys [:name, :storage, :jobs]
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{
+    name: GenServer.name(),
+    storage: module(),
+    jobs: [map()]
+  }
+end
+```
+
+### State — Runtime state with different fields than config
+
+```elixir
+defmodule MyApp.JobScheduler.State do
+  @moduledoc false
+
+  @enforce_keys [:storage, :storage_pid, :jobs, :debug_logging]
+  defstruct @enforce_keys ++ [buffer: [], remaining_demand: 0]
+
+  @type t :: %__MODULE__{
+    storage: module(),
+    storage_pid: pid(),
+    jobs: %{atom() => Job.t()},
+    buffer: [Event.t()],
+    remaining_demand: non_neg_integer(),
+    debug_logging: boolean()
+  }
+end
+```
+
+### GenServer uses typed structs
+
+```elixir
+defmodule MyApp.JobScheduler do
+  use GenServer
+  alias __MODULE__.{StartOpts, State}
+
+  def start_link(%StartOpts{} = opts) do
+    GenServer.start_link(__MODULE__, opts, name: opts.name)
+  end
+
+  @impl true
+  def init(%StartOpts{} = opts) do
+    # Convert config to runtime state — different struct
+    {:ok, %State{
+      storage: opts.storage,
+      storage_pid: GenServer.whereis(opts.storage),
+      jobs: Map.new(opts.jobs, &{&1.name, &1}),
+      debug_logging: Application.get_env(:my_app, :debug_logging, false)
+    }}
+  end
+
+  @impl true
+  def handle_call(:jobs, _from, %State{} = state) do
+    {:reply, Map.values(state.jobs), state}
+  end
+end
+```
+
+**Benefits:**
+- `@enforce_keys` catches missing fields at construction time
+- `@type t` enables Dialyzer to verify state access
+- Separating StartOpts from State makes clear what's configuration vs runtime
+- Pattern matching on `%State{}` in callbacks documents intent
+- Easy to add fields without breaking existing code
+
+**When to use:**
+- GenServer with 4+ state fields
+- State shape differs from configuration shape
+- Multiple processes in a supervision tree with similar but distinct config
+- NOT needed for simple GenServers with 1-2 fields — a plain map or tuple suffices
+
 ## Related Files
 
 - **[SKILL.md](SKILL.md)** — OTP rules, GenServer/gen_statem key patterns, supervisor strategies, decision frameworks
-- **[otp-reference.md](otp-reference.md)** — Callback signatures, ETS cheatsheet, match specs, process info, release commands
+- **[otp-reference.md](otp-reference.md)** — Callback signatures, ETS cheatsheet, match specs, process info, release commands, send vs handle_continue, monitor lifecycle, deadline timeouts
 - **[otp-advanced.md](otp-advanced.md)** — GenStage, Flow, Broadway, hot code upgrades, production debugging
 - **[production.md](production.md)** — Production patterns, telemetry deep-dive (also covers telemetry — see Telemetry Integration example above for complementary patterns)

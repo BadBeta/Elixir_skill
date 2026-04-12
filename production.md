@@ -1795,6 +1795,110 @@ end
 )
 ```
 
+## NimbleOptions for Configuration Validation
+
+NimbleOptions is the standard library for validating keyword list options in Elixir. Used by Broadway, Finch, NimblePool, and dozens of other libraries. It provides declarative schema validation with auto-generated documentation.
+
+### Basic Usage
+
+```elixir
+defmodule MyServer do
+  @options_schema [
+    host: [
+      type: :string,
+      required: true,
+      doc: "Hostname to connect to."
+    ],
+    port: [
+      type: :pos_integer,
+      default: 4000,
+      doc: "Port number."
+    ],
+    pool_size: [
+      type: :pos_integer,
+      default: 10,
+      doc: "Number of connections in the pool."
+    ],
+    transport: [
+      type: {:in, [:tcp, :ssl]},
+      default: :tcp,
+      doc: "Transport protocol."
+    ],
+    ssl_opts: [
+      type: :keyword_list,
+      default: [],
+      doc: "SSL options passed to `:ssl.connect/3`.",
+      keys: [
+        verify: [type: {:in, [:verify_peer, :verify_none]}, default: :verify_peer],
+        cacertfile: [type: :string]
+      ]
+    ]
+  ]
+
+  def start_link(opts) do
+    opts = NimbleOptions.validate!(opts, @options_schema)
+    # opts is now validated and defaults are applied
+    GenServer.start_link(__MODULE__, opts)
+  end
+end
+```
+
+### Auto-Generated Documentation
+
+```elixir
+defmodule MyServer do
+  @options_schema [...]
+
+  @moduledoc """
+  My server module.
+
+  ## Options
+
+  #{NimbleOptions.docs(@options_schema)}
+  """
+end
+# Produces formatted Markdown with types, defaults, and descriptions
+```
+
+### Common Types
+
+| Type | Validates |
+|---|---|
+| `:string` | Binary string |
+| `:atom` | Atom |
+| `:pos_integer` | Integer > 0 |
+| `:non_neg_integer` | Integer >= 0 |
+| `:boolean` | true/false |
+| `{:in, list}` | Value is member of list |
+| `:keyword_list` | Keyword list (with optional nested `:keys`) |
+| `{:list, inner_type}` | List where all elements match inner_type |
+| `{:or, [type1, type2]}` | Value matches any of the types |
+| `{:custom, mod, fun, args}` | Custom validation function |
+| `:mfa` | `{module, function, args}` tuple |
+| `{:fun, arity}` | Function with given arity |
+
+### Nested Validation with Recursive Schemas
+
+```elixir
+@schema [
+  retry: [
+    type: :keyword_list,
+    doc: "Retry configuration.",
+    keys: [
+      max_attempts: [type: :pos_integer, default: 3],
+      backoff: [type: {:in, [:linear, :exponential]}, default: :exponential],
+      base_ms: [type: :pos_integer, default: 100]
+    ]
+  ]
+]
+```
+
+**When to use NimbleOptions:**
+- Library `start_link/1` or public API options
+- Any keyword list that crosses a module boundary
+- Configuration that needs auto-generated docs
+- NOT for simple internal functions with 1-2 known options
+
 ## Related Files
 
 - **[SKILL.md](SKILL.md)** — Core Elixir rules, BAD/GOOD pairs, decision frameworks
