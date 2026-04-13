@@ -2825,7 +2825,18 @@ mix archdo --only 4.17,6.12         # run specific rules
 mix archdo --freeze                 # baseline existing violations
 ```
 
-**Two-layer review workflow:** When reviewing an Elixir project, use Archdo first for mechanical analysis, then apply Elixir domain judgment to assess whether each finding is a real issue or an intentional trade-off. Not every finding needs fixing — some are deliberate architectural choices (e.g., Oban duplicates engine code intentionally for backend independence).
+**Two-layer review workflow:** When reviewing an Elixir project, ALWAYS use this approach:
+1. **Layer 1:** Run `mix archdo` for mechanical structural analysis
+2. **Layer 2:** Load this skill and the relevant subskills to evaluate each finding with domain knowledge. Consult these subskills based on finding category:
+   - OTP rules (5.x) → `otp-reference.md`, `otp-examples.md`, `otp-advanced.md`
+   - Architecture/boundary rules (1.x, 4.x) → `architecture-reference.md`
+   - Error handling rules (6.9-6.11) → `language-patterns.md` (error handling section)
+   - Testing rules (7.x) → use the `elixir-testing` skill
+   - Ecto/schema rules → `ecto-reference.md`, `ecto-examples.md`
+   - Event sourcing rules (8.x) → use the `event-sourcing` skill
+   - NIF rules (11.x) → use the `rust-nif` skill
+
+Not every finding needs fixing — some are deliberate architectural choices. The subskills provide the context to distinguish real issues from intentional trade-offs.
 
 **Key rule categories:** Boundaries (1.x), Duplication (3.x), Abstraction/Seams (4.x), OTP (5.x), Module Quality (6.x), Testing (7.x), Event Sourcing (8.x), NIF Safety (11.x).
 
