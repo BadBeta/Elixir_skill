@@ -2810,6 +2810,25 @@ mix sobelow --details Config   # explain a specific category
 
 **What Sobelow catches:** SQL injection, XSS, directory traversal, unsafe deserialization, hardcoded secrets, insecure HTTP, missing CSRF protection, unsafe Ecto raw queries, RCE via `Code.eval_string`, insecure cookie settings, missing security headers. Always run on Phoenix projects before deployment.
 
+### Archdo (Architectural Quality)
+
+Archdo checks the architectural patterns that Credo, Dialyzer, and Sobelow don't cover: OTP anti-patterns, module boundaries, SOLID principles, seam integrity, resilience, and code duplication.
+
+```bash
+# Add {:archdo, "~> 0.1", only: [:dev], runtime: false}
+mix archdo                          # scan lib/ for architectural issues
+mix archdo --paths lib/my_app/accounts  # scan specific paths
+mix archdo --format compact         # one-line-per-finding output
+mix archdo --boundaries             # enable cross-module dependency analysis
+mix archdo --functions              # enable function-level graph analysis
+mix archdo --only 4.17,6.12         # run specific rules
+mix archdo --freeze                 # baseline existing violations
+```
+
+**Two-layer review workflow:** When reviewing an Elixir project, use Archdo first for mechanical analysis, then apply Elixir domain judgment to assess whether each finding is a real issue or an intentional trade-off. Not every finding needs fixing — some are deliberate architectural choices (e.g., Oban duplicates engine code intentionally for backend independence).
+
+**Key rule categories:** Boundaries (1.x), Duplication (3.x), Abstraction/Seams (4.x), OTP (5.x), Module Quality (6.x), Testing (7.x), Event Sourcing (8.x), NIF Safety (11.x).
+
 ### mix format
 
 ```elixir
