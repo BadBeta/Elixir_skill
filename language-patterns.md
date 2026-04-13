@@ -1366,6 +1366,129 @@ end
 
 This allows multiple modules to wrap `call/2` in layers — each layer calls `super` to invoke the previous definition.
 
+### `defdelegate` for Callback Reuse — Thin Wrapper Modules (AshAuthentication Pattern)
+
+When multiple modules share the same implementation for behaviour callbacks, use `defdelegate` to create thin wrappers. This is Elixir's equivalent of implementation inheritance — without the inheritance.
+
+```elixir
+# Base implementation — OAuth2 does the real work
+defmodule MyApp.Strategy.OAuth2 do
+  def transform(strategy, dsl_state) do
+    # Complex OAuth2 transformation logic (100+ lines)
+    # ...
+  end
+
+  def verify(strategy, dsl_state) do
+    # Validate client_id, client_secret, URLs
+    # ...
+  end
+end
+
+# GitHub is OAuth2 with different defaults — delegates ALL callbacks
+defmodule MyApp.Strategy.GitHub do
+  defstruct [:client_id, :client_secret, name: :github]
+
+  defdelegate transform(strategy, dsl_state), to: MyApp.Strategy.OAuth2
+  defdelegate verify(strategy, dsl_state), to: MyApp.Strategy.OAuth2
+end
+
+# Google overrides one callback, delegates the rest
+defmodule MyApp.Strategy.Google do
+  defstruct [:client_id, :client_secret, :hd, name: :google]
+
+  defdelegate transform(strategy, dsl_state), to: MyApp.Strategy.OAuth2
+
+  def verify(strategy, dsl_state) do
+    # Google-specific: validate hosted domain (hd) config
+    with :ok <- MyApp.Strategy.OAuth2.verify(strategy, dsl_state) do
+      validate_hosted_domain(strategy)
+    end
+  end
+end
+```
+
+**When to use `defdelegate` for callbacks:**
+- Multiple modules implement the same behaviour with identical logic
+- A "subtype" differs only in configuration/defaults, not behavior
+- You want to override one callback while delegating the rest (Google example above)
+- NOT when the delegated module needs access to the delegating module's state — that's a sign they should share a helper module instead
+
+### `@after_verify` — Post-Compile Validation
+
+`@after_verify` runs after a module is fully compiled. Unlike `@before_compile` (which can inject code), `@after_verify` is read-only — it validates but cannot modify the module. Use it to check that the module's final state is consistent.
+
+```elixir
+defmodule MyBehaviour do
+  @callback process(term()) :: {:ok, term()} | {:error, term()}
+
+  # Old callback — deprecated, kept for backwards compatibility
+  @callback process(term(), keyword()) :: {:ok, term()} | {:error, term()}
+  @optional_callbacks process: 2
+
+  defmacro __using__(_opts) do
+    quote do
+      @behaviour MyBehaviour
+      @after_verify {MyBehaviour, :verify_callback_arity}
+    end
+  end
+
+  # Called after the using module is fully compiled
+  def verify_callback_arity(module) do
+    has_1 = Module.defines?(module, {:process, 1})
+    has_2 = Module.defines?(module, {:process, 2})
+
+    cond do
+      has_1 and has_2 ->
+        raise CompileError,
+          description: "#{inspect(module)} defines both process/1 and process/2 — pick one"
+      not has_1 and not has_2 ->
+        raise CompileError,
+          description: "#{inspect(module)} must define process/1"
+      has_2 ->
+        IO.warn("#{inspect(module)}: process/2 is deprecated, use process/1")
+      true ->
+        :ok
+    end
+  end
+end
+```
+
+**`@after_verify` vs `@before_compile`:**
+
+| | `@before_compile` | `@after_verify` |
+|---|---|---|
+| When | Before compilation finishes | After compilation finishes |
+| Can inject code | Yes (`defmacro __before_compile__`) | No — read-only |
+| Can check which functions exist | Yes, via `Module.defines?/2` | Yes, via `Module.defines?/2` |
+| Use for | DSL code generation | Mutual exclusivity checks, deprecation warnings |
+| AshAuthentication uses for | — | Secret arity validation (3 vs 4 args) |
+
+### Compile-Time Transformers — Convention Over Configuration
+
+Ash and Spark use a **transformer** pattern to auto-generate boilerplate at compile time. The user declares *what* they want in a DSL; transformers generate *how* it works:
+
+```elixir
+# User writes minimal DSL:
+defmodule MyApp.User do
+  use Ash.Resource
+
+  authentication do
+    strategy :password do
+      identity_field :email
+    end
+  end
+end
+
+# The password transformer AUTO-GENERATES:
+# - A :sign_in action with email/password arguments
+# - A :register action with email/password/password_confirmation
+# - Hash password changes, sign-in preparations
+# - Token generation if tokens are enabled
+# User can override any generated action by defining it explicitly
+```
+
+This pattern is broadly useful beyond Ash — any DSL that needs to generate boilerplate from declarations. The key implementation tool is `Spark.Dsl.Transformer` (or `@before_compile` for non-Spark libraries).
+
 ### The DSL Recipe — __using__ + Accumulated Attributes + @before_compile
 
 This three-step pattern is how Phoenix, Plug, Absinthe, and Ash build DSLs:

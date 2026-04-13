@@ -461,6 +461,123 @@ end
 | One module implements the whole contract | Each type implements its own logic |
 | Compile-time or runtime config selects impl | Type of argument selects impl at call site |
 
+### Protocol-on-Struct for Strategy/Plugin Dispatch (AshAuthentication Pattern)
+
+The behaviour-vs-protocol table above covers the common cases. There's a third pattern: **protocol dispatch on strategy structs** — when you have a collection of typed structs and need polymorphic dispatch without knowing all types at compile time.
+
+```elixir
+# Define a protocol — each strategy struct implements its own dispatch
+defprotocol MyApp.Strategy do
+  @doc "Execute the strategy for the given phase"
+  def plug(strategy, conn, phase)
+
+  @doc "List phases this strategy supports"
+  def phases(strategy)
+
+  @doc "List actions this strategy provides"
+  def actions(strategy)
+end
+
+# Each strategy is a struct that implements the protocol
+defmodule MyApp.Strategy.Password do
+  defstruct [:identity_field, :hashed_password_field, :resettable]
+
+  defimpl MyApp.Strategy do
+    def plug(strategy, conn, :sign_in), do: PasswordActions.sign_in(conn, strategy)
+    def plug(strategy, conn, :register), do: PasswordActions.register(conn, strategy)
+    def phases(_), do: [:sign_in, :register, :reset]
+    def actions(_), do: [:sign_in, :register, :reset_request, :reset]
+  end
+end
+
+defmodule MyApp.Strategy.OAuth2 do
+  defstruct [:client_id, :client_secret, :authorize_url, :token_url]
+
+  defimpl MyApp.Strategy do
+    def plug(strategy, conn, :authorize), do: OAuthActions.authorize(conn, strategy)
+    def plug(strategy, conn, :callback), do: OAuthActions.callback(conn, strategy)
+    def phases(_), do: [:authorize, :callback]
+    def actions(_), do: [:authorize, :callback]
+  end
+end
+
+# Thin subtypes reuse a base strategy's struct + protocol impl
+defmodule MyApp.Strategy.GitHub do
+  # GitHub IS OAuth2 with different defaults
+  defdelegate plug(strategy, conn, phase), to: MyApp.Strategy.OAuth2.MyApp.Strategy
+  # Or: the GitHub struct can be the same as OAuth2 with auto_set_fields
+end
+
+# Dispatch works on any strategy struct — open for extension
+def handle_request(conn, %strategy_mod{} = strategy) do
+  MyApp.Strategy.plug(strategy, conn, phase_from_request(conn))
+end
+```
+
+**When to use protocol-on-struct (vs behaviour):**
+
+| Use Protocol-on-Struct | Use Behaviour |
+|---|---|
+| Collection of typed strategy/plugin structs | Single configurable adapter |
+| Dispatch varies by struct type at runtime | Dispatch selected at compile-time/config |
+| Open for extension (new structs, no core changes) | Closed set of implementations |
+| Each struct carries its own config fields | Config lives in Application env |
+| AshAuthentication, Membrane (elements) | Ecto adapters, Oban plugins, Mox |
+
+### Error Wrapping with Structured Context (AshAuthentication Pattern)
+
+For security-sensitive or complex domains, wrap internal errors in a generic domain error with structured `caused_by` metadata. This lets you log full details internally while exposing only safe information externally.
+
+```elixir
+defmodule MyApp.AuthError do
+  defexception [:message, :caused_by, :strategy, :changeset]
+
+  @impl true
+  def message(%{message: msg}), do: msg
+end
+
+# In strategy action code — exhaustive matching with different caused_by
+defp sign_in(strategy, params) do
+  case query_user(strategy, params) do
+    {:ok, nil} ->
+      # Simulate hash to prevent timing attacks
+      Bcrypt.no_user_verify()
+      {:error, AuthError.exception(
+        message: "Authentication failed",
+        strategy: strategy,
+        caused_by: %{module: __MODULE__, action: :sign_in,
+                      message: "Query returned no users"}
+      )}
+
+    {:ok, user} ->
+      if Bcrypt.verify_pass(params["password"], user.hashed_password) do
+        {:ok, user}
+      else
+        {:error, AuthError.exception(
+          message: "Authentication failed",
+          strategy: strategy,
+          caused_by: %{module: __MODULE__, action: :sign_in,
+                        message: "Password verification failed"}
+        )}
+      end
+
+    {:error, %Ash.Error{} = error} ->
+      {:error, AuthError.exception(
+        message: "Authentication failed",
+        strategy: strategy,
+        caused_by: %{module: __MODULE__, action: :sign_in,
+                      message: Exception.message(error)}
+      )}
+  end
+end
+```
+
+**Key principles:**
+- The external-facing error (`"Authentication failed"`) is always generic — never reveals whether the user exists or the password was wrong
+- The `caused_by` map captures full internal details for logging/debugging
+- Opt-in verbose logging: `if config.debug_auth_failures?, do: Logger.warning(inspect(caused_by))`
+- Works with Splode (Ash's error library) which provides error classes (`:invalid`, `:forbidden`, `:framework`) and structured field declarations
+
 ### Real-World Layering Examples
 
 **Ecto's layers:**

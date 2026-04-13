@@ -1,6 +1,6 @@
 ---
 name: elixir
-version: "0.2.0"
+version: "0.3.0"
 description: Elixir functional programming, OTP, and Ecto — pattern matching, pipelines, Enum/Stream, with-chains, ok/error tuples, multi-clause functions, GenServer, gen_statem, supervision, ETS, Ecto schemas/changesets/queries/migrations, configuration, telemetry, HTTP clients, and type system. ALWAYS use this skill when writing Elixir to avoid imperative anti-patterns. ALWAYS use when designing OTP supervision trees, state machines, or distributed systems. ALWAYS consult the Architecture and OTP sections when planning new Elixir projects, refactoring existing ones, or making structural decisions.
 ---
 
@@ -314,6 +314,21 @@ def create(%{age: age, name: name})
 end
 ```
 
+**Guards on struct fields** — structs are maps, so dot-access works in guards (AshAuthentication pattern):
+
+```elixir
+# Check a single field without destructuring the whole struct
+def tokens_required?(strategy) when strategy.sign_in_tokens_enabled?, do: true
+def tokens_required?(strategy) when is_map(strategy.resettable), do: true
+def tokens_required?(_), do: false
+
+# Combine with is_map_key for optional fields
+def has_feature?(config) when is_map_key(config, :feature) and config.feature, do: true
+def has_feature?(_), do: false
+```
+
+Use this when you care about one field of a large struct — cleaner than pattern matching `%MyStruct{field: value}` when you don't need to bind other fields.
+
 **Allowed in guards:** `==`, `!=`, `===`, `!==`, `<`, `>`, `<=`, `>=`, `and`, `or`, `not`, `in`, `+`, `-`, `*`, `/`, `abs`, `div`, `rem`, `round`, `trunc`, `is_atom`, `is_binary`, `is_integer`, `is_float`, `is_list`, `is_map`, `is_tuple`, `is_nil`, `is_boolean`, `is_number`, `is_pid`, `is_struct`, `is_function`, `byte_size`, `elem`, `hd`, `tl`, `length`, `map_size`, `tuple_size`, `is_map_key`
 
 **NOT allowed:** Custom function calls, `String.length/1`, `Enum.*` — only the built-in list above. Also allowed: `Bitwise.&&&`, `Bitwise.|||`, `Bitwise.bsl`, `Bitwise.bsr` (import `Bitwise` first).
@@ -538,6 +553,24 @@ order
 |> calculate_total()
 |> tap(&Logger.debug("Total: #{&1}"))
 |> apply_tax()
+
+# Pipe into case — natural end of a pipeline when you need to branch
+# Common in Ash, Phoenix, and library code (AshStateMachine, Oban)
+resource
+|> lookup_transitions(action_name)
+|> Enum.find(&match_transition?(&1, old_state, target))
+|> case do
+  nil -> {:error, :no_matching_transition}
+  transition -> {:ok, apply_transition(transition)}
+end
+
+# Also works with with — pipe builds the value, case branches on it
+conn
+|> fetch_session("user_token")
+|> case do
+  nil -> assign(conn, :current_user, nil)
+  token -> assign(conn, :current_user, Accounts.get_user_by_token(token))
+end
 
 # Error pipeline with with — short-circuit on first error
 with {:ok, user} <- fetch_user(id),

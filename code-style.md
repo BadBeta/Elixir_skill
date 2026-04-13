@@ -783,7 +783,22 @@ case result do
   {:ok, value} -> value
   {:error, _} -> nil
 end
+
+# GOOD: Pipe directly into case — natural end of a pipeline
+# Common in Ash, Phoenix, Oban when the pipeline builds a value to branch on
+data
+|> transform()
+|> validate()
+|> case do
+  {:ok, value} -> value
+  {:error, _} -> nil
+end
 ```
+
+**When to use `|> case do`:**
+- The expression before `case` is a pipeline (2+ steps) — avoids an intermediate variable
+- Only two branches (found/not-found, ok/error) — keeps it readable
+- Don't nest `|> case do` inside another `|> case do` — extract a function instead
 
 **Inconsistent do: keyword vs do/end block:**
 ```elixir
