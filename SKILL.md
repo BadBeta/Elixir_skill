@@ -38,7 +38,7 @@ description: Elixir functional programming, OTP, and Ecto — pattern matching, 
 
 ### Rules for Writing Elixir (LLM)
 
-1. **NEVER use if/else for structural dispatch.** Use multi-clause functions with pattern matching. Only use `if` for simple single-condition boolean checks with no alternative branches.
+1. **NEVER use if/else for structural dispatch.** Use multi-clause functions with pattern matching. Use `if` only for simple boolean guards with no else branch (side-effect or early return). When both branches return values, prefer `case bool_fn?() do true -> ...; false -> ... end` — this matches the literal boolean (strict), unlike `if` which tests truthiness. Elixir's own stdlib (`Keyword`, `Macro`) and Credo-endorsed projects use this pattern. When the function signature is free (not a behaviour callback), prefer multi-clause dispatch instead.
 2. **NEVER use try/rescue for expected failures.** Use `{:ok, _}/{:error, _}` tuples with `case` or `with`. Reserve try/rescue for truly unexpected exceptions at system boundaries. Exception: `raise ArgumentError` is appropriate for invalid configuration at startup — these are programmer errors, not runtime failures (NimblePool, NimbleOptions pattern).
 3. **NEVER write imperative loops.** Elixir has no for/while loops with mutable state. Use `Enum.map/2`, `Enum.filter/2`, `Enum.reduce/3`, or `for` comprehensions.
 4. **ALWAYS design functions for pipe-ability.** The subject (primary data) goes as the first argument. Return the transformed data. For mutation/configuration APIs, return the subject itself to enable chaining (Mox pattern: `MockMod |> expect(:fun, &impl/1) |> allow(self(), pid)`).
@@ -68,7 +68,9 @@ Check this table BEFORE writing control flow or collection operations:
 | Branch on data shape/type | Multi-clause function | `if`/`case` |
 | Branch on ok/error from 1 operation | `case` | `with`, `if` |
 | Chain 2+ ok/error operations | `with` | nested `case` |
-| Branch on a simple boolean | `if` (no else needed) | `case true/false` |
+| Boolean guard, side-effect only | `if` (no else) | `if/else` returning values |
+| Boolean branch, both paths return | `case bool do true/false` | `if/else` (truthy, not strict) |
+| Boolean dispatch, free signature | Multi-clause function | `if`/`case` in body |
 | Dispatch on struct type | Multi-clause function | `if is_struct(x, Mod)` |
 | Handle expected failure from call | `{:ok,_}/{:error,_}` tuples | `try/rescue` |
 | Handle exits from GenServer.call | `catch :exit` (boundary only) | `try/rescue` |
