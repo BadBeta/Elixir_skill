@@ -1326,6 +1326,34 @@ end
 
 Order: @moduledoc, use/import/alias/require, module attributes, types, schema/struct, public functions with @doc/@spec, private functions.
 
+### Import Guidelines
+
+```elixir
+# BAD: Broad import pulls entire module into namespace
+import Bamboo.ApiError  # Which functions come from here vs local?
+
+# GOOD: alias for qualified calls (default choice)
+alias Bamboo.ApiError
+ApiError.build(response)
+
+# GOOD: import with :only for specific functions
+import Ecto.Changeset, only: [cast: 3, validate_required: 2]
+
+# EXCEPTION: DSL/macro modules designed for full import are fine
+import Ecto.Query        # Provides from/2, where/3, select/3 etc. — intended usage
+import Ecto.Changeset    # Provides cast/3, validate_*/2 etc. — intended usage
+import MyApp.Guards      # Custom guard macros — must be imported for guard clauses
+```
+
+**When to use each:**
+
+| Strategy | When |
+|---|---|
+| `alias` + qualified calls | Default — always prefer this |
+| `import ... only:` | Need unqualified calls for readability (small set) |
+| Full `import` | DSL/macro modules designed for it (Ecto.Query, guards, test helpers) |
+| `use` | Module provides `__using__` macro (Phoenix.Component, GenServer) |
+
 ### Public vs Private Functions
 
 **Default to `defp`** — only promote to `def` when external callers need it.
@@ -1829,116 +1857,100 @@ put_elem(tuple, 1, :new_val)  # Returns new tuple (copies all)
 
 ## Quick References
 
-### Enum — Top Functions
+For the complete stdlib reference (Enum, Map, String, Keyword, File, Path, System, Regex, Date/Time, Process, :ets, :crypto, :timer, :queue, :persistent_term, and more), see [quick-references.md](quick-references.md).
+
+### Enum — Top 20
 
 ```elixir
 Enum.map(enum, fun)              # Transform each element
 Enum.filter(enum, fun)           # Keep where fun returns truthy
-Enum.reject(enum, fun)           # Remove where fun returns truthy
 Enum.reduce(enum, acc, fun)      # Fold into single value
 Enum.find(enum, fun)             # First match or nil
-Enum.any?(enum, fun)             # At least one truthy?
-Enum.all?(enum, fun)             # All truthy?
-Enum.count(enum)                 # Count all
-Enum.count(enum, fun)            # Count matching
 Enum.flat_map(enum, fun)         # Map then flatten one level
 Enum.group_by(enum, key_fun)     # %{key => [elements]}
 Enum.sort_by(enum, fun)          # Sort by derived key
-Enum.sort_by(enum, fun, :desc)   # Sort descending
-Enum.zip(enum1, enum2)           # [{a1, a2}, {b1, b2}]
-Enum.chunk_every(enum, n)        # [[a,b], [c,d], [e]]
-Enum.take(enum, n)               # First n elements
 Enum.into(enum, collectable)     # Into map, MapSet, etc.
 Enum.reduce_while(enum, acc, fun) # {:cont, acc} or {:halt, acc}
 Enum.with_index(enum)            # [{elem, 0}, {elem, 1}, ...]
-Enum.with_index(enum, 1)         # Start from 1
 Enum.frequencies(enum)           # %{elem => count}
-Enum.frequencies_by(enum, fun)   # %{key => count}
 Enum.map_reduce(enum, acc, fun)  # {mapped_list, final_acc}
 Enum.uniq_by(enum, fun)          # Deduplicate by key function
-Enum.each(enum, fun)             # Invoke fun on each element (returns :ok)
-Enum.zip_with([a, b], fn [x, y] -> {x, y} end)  # Zip with transform
-Enum.min_max_by(enum, fun)       # {min, max} by key
-Enum.slide(enum, index, to)      # Move element (1.13+)
+Enum.chunk_every(enum, n)        # [[a,b], [c,d], [e]]
+Enum.zip(enum1, enum2)           # [{a1, a2}, {b1, b2}]
+Enum.any?(enum, fun)             # At least one truthy?
+Enum.count(enum)                 # Count all
+Enum.each(enum, fun)             # Side effects only (returns :ok)
+Enum.take(enum, n)               # First n elements
+Enum.reject(enum, fun)           # Remove where fun returns truthy
 ```
 
-### Map — Top Functions
+### Map / String / File — Top 20 Each
 
 ```elixir
-Map.get(map, key, default)       # Value or default
-Map.put(map, key, value)         # Add or replace
-Map.merge(map1, map2)            # Combine (map2 wins conflicts)
-Map.update(map, key, default, fun) # Update or set default
-Map.delete(map, key)             # Remove key
-Map.keys(map)                    # List of keys
-Map.values(map)                  # List of values
-Map.new(enum, fn x -> {k, v} end) # Build from enumerable
+# Map
+Map.get(map, key, default)        Map.put(map, key, value)
+Map.merge(map1, map2)             Map.new(enum, &{k, v})
+Map.update(map, key, default, fn) Map.delete(map, key)
+
+# String
+String.split(s, ",")              String.trim(s)
+String.replace(s, "l", "r")      String.starts_with?(s, "h")
+String.downcase(s)                String.to_integer(s)
+
+# File / Path / System
+File.read!("path")                File.write!("path", content)
+File.read("path")                 File.stream!("path")
+File.exists?("path")              File.mkdir_p!("a/b/c")
+Path.join("a", "b")               Path.expand("../f", __DIR__)
+System.fetch_env!("DB_URL")       System.monotonic_time(:ms)
 ```
 
-### String — Top Functions
+### Keyword / Regex / Date / Process
 
 ```elixir
-String.split("a,b,c", ",")              # ["a", "b", "c"]
-String.trim("  hi  ")                   # "hi"
-String.replace("hello", "l", "r")       # "herro"
-String.starts_with?("hello", "hel")     # true
-String.contains?("hello", "ell")        # true
-String.downcase("Hello")                # "hello"
-String.slice("hello", 1..3)             # "ell"
-String.to_integer("42")                 # 42
+# Keyword (ordered, duplicate keys allowed)
+Keyword.get(kw, :key, default)    Keyword.put(kw, :key, value)
+Keyword.merge(kw1, kw2)           Keyword.validate!(kw, [:a, :b, c: 3])  # 1.13+
+
+# Regex
+Regex.match?(~r/^\d+$/, "123")    Regex.run(~r/(\w+)@(\w+)/, "a@b")
+Regex.scan(~r/\d+/, "a1b2c3")     Regex.named_captures(~r/(?<y>\d{4})/, "2025")
+
+# Date/Time
+DateTime.utc_now()                 Date.utc_today()
+DateTime.diff(dt1, dt2, :second)   Calendar.strftime(dt, "%Y-%m-%d")
+
+# Process
+self()                             Process.send_after(pid, :msg, 5_000)
+Process.alive?(pid)                Process.monitor(pid)
+Task.async(fn -> work() end) |> Task.await()
 ```
 
-### File, Path & System — Top Functions
+### Erlang Standard Library — Top 12
 
 ```elixir
-# Reading/writing
-File.read!("path")                      # binary (raises on error)
-File.write!("path", content)            # :ok (raises on error)
-File.read("path")                       # {:ok, binary} | {:error, reason}
-File.stream!("path")                    # lazy line stream (large files)
-
-# Checking
-File.exists?("path")                    # boolean
-File.dir?("path")                       # boolean
-File.regular?("path")                   # boolean (is regular file?)
-File.stat!("path")                      # %File.Stat{size: ..., type: ...}
-
-# Filesystem operations
-File.mkdir_p!("a/b/c")                  # create dirs recursively
-File.cp!("src", "dst")                  # copy file
-File.cp_r!("src_dir", "dst_dir")        # copy recursively
-File.rm_rf("dir")                       # {:ok, files} — remove recursively
-File.rename("old", "new")               # rename/move
-File.ls("dir")                          # {:ok, [filenames]}
-File.touch!("path")                     # create or update timestamp
-
-# Path manipulation
-Path.join("a", "b")                     # "a/b"
-Path.join(["a", "b", "c"])              # "a/b/c"
-Path.expand("../file", __DIR__)         # absolute path
-Path.basename("/a/b/c.ex")              # "c.ex"
-Path.dirname("/a/b/c.ex")               # "/a/b"
-Path.extname("file.ex")                 # ".ex"
-Path.rootname("file.ex")                # "file"
-Path.wildcard("lib/**/*.ex")            # glob matching
-Path.relative_to("a/b/c", "a")         # "b/c"
-
-# System
-System.get_env("HOME")                  # value or nil
-System.fetch_env!("DATABASE_URL")       # value or raise
-System.cmd("git", ["status"])           # {output, exit_code}
-System.monotonic_time(:millisecond)     # for measuring durations
-System.tmp_dir!()                       # temp directory path
+:timer.send_after(5_000, self(), :tick)                         # Delayed message
+:timer.tc(fn -> work() end)                                     # Measure execution {μs, result}
+:queue.new() |> :queue.in(:a)                                   # O(1) FIFO queue
+:persistent_term.put({MyApp, :cfg}, val)                        # Fast reads, expensive writes
+:persistent_term.get({MyApp, :cfg})                             # Global config cache
+:ets.new(:cache, [:named_table, :public, read_concurrency: true]) # Concurrent KV store
+:ets.insert(:cache, {key, value})                               # Write
+:ets.lookup(:cache, key)                                        # Read [{key, val}]
+:crypto.strong_rand_bytes(32)                                   # Secure random
+:crypto.hash(:sha256, data)                                     # SHA-256
+:crypto.mac(:hmac, :sha256, key, msg)                           # HMAC-SHA256
+:erlang.system_info(:process_count)                             # VM introspection
 ```
 
-> **Deep dive:** [quick-references.md](quick-references.md) — full Enum (transform, filter, reduce, search, group,
-> collect, combine incl. `map_intersperse`), Map (read, write, transform, pop, `intersect/2,3`), Keyword (read,
-> write, split, validate), List (operations, tuple-list), String (split/join, trim/pad, search/test, transform,
-> convert, parsing, **graphemes vs codepoints**, `byte_size`, `normalize`), Regex (match, scan, named captures,
-> compile), File/Path/System, URI/Encoding/Base, Date/Time (`Calendar.strftime`, `DateTime.shift`),
-> IO/Inspect (options, pipeline debugging), Access/Nested Data (`get_in`/`put_in` with `Access.all`/`filter`/`key`),
-> Process/Concurrency, Application/Code, Macro/Module (AST traversal, `prewalk`/`postwalk`), Range, Agent,
-> Kernel pipeline helpers (`tap`/`then`/`dbg`), Erlang stdlib (21 modules), JSON encoding.
+### JSON (Elixir 1.18+)
+
+```elixir
+JSON.encode!(%{name: "test", age: 30})
+JSON.decode!(~s({"name":"test"}))
+```
+
+> **Full reference:** [quick-references.md](quick-references.md) — complete Enum (30+ functions), Map, Keyword, List, String (graphemes vs codepoints, byte_size, normalize), Regex (named captures, compile), File/Path/System, URI/Base, Date/Time (strftime, shift), IO/Inspect, Access/Nested Data (get_in/put_in with Access.all/filter/key), Process, Application/Code, Macro/Module (prewalk/postwalk), Agent, Kernel helpers (tap/then/dbg), 21 Erlang modules (:crypto with ECDH/AEAD/Ed25519/HKDF, :ets match specs, :queue, :persistent_term, :atomics, :counters, :digraph, :gb_trees, :binary, :timer, :io_lib, :calendar, :unicode, :zlib, :telemetry, :sys), JSON encoding.
 
 ## Stream, Enum, and the Enumerable Protocol
 
@@ -2322,113 +2334,6 @@ def profile_changeset(user, attrs), do: cast(user, attrs, [:name]) |> ...
 > **defguard type interaction**, **Dialyzer setup and comparison** with compiler types, notation comparison
 > table, version feature summary (1.17–1.20).
 
-## More Quick References
-
-### Keyword — Top Functions
-
-```elixir
-Keyword.get(kw, :key, default)       # Value or default
-Keyword.fetch!(kw, :key)             # Value or raise
-Keyword.put(kw, :key, value)         # Add/replace (keeps last)
-Keyword.merge(kw1, kw2)              # Combine (kw2 wins)
-Keyword.take(kw, [:a, :b])           # Keep only these keys
-Keyword.drop(kw, [:a, :b])           # Remove these keys
-Keyword.validate!(kw, [:a, :b, c: 3]) # Validate keys, set defaults (1.13+)
-Keyword.pop(kw, :key, default)       # {value, rest}
-Keyword.split(kw, [:a])              # {[a: 1], [b: 2]}
-```
-
-### Regex Quick Reference
-
-```elixir
-Regex.match?(~r/^\d+$/, "123")          # true
-Regex.run(~r/(\w+)@(\w+)/, "a@b")       # ["a@b", "a", "b"]
-Regex.scan(~r/\d+/, "a1b2c3")           # [["1"], ["2"], ["3"]]
-Regex.replace(~r/\d/, "a1b2", "*")       # "a*b*"
-Regex.split(~r/[,;]/, "a,b;c")          # ["a", "b", "c"]
-Regex.named_captures(~r/(?<y>\d{4})-(?<m>\d{2})/, "2025-03")  # %{"y" => "2025", "m" => "03"}
-```
-
-### Date, Time & NaiveDateTime
-
-```elixir
-Date.utc_today()                         # ~D[2025-03-16]
-Date.diff(~D[2025-03-16], ~D[2025-01-01]) # 74
-DateTime.utc_now()                       # ~U[2025-03-16 12:00:00Z]
-NaiveDateTime.utc_now()                  # ~N[2025-03-16 12:00:00]
-DateTime.diff(dt1, dt2, :second)         # Difference in seconds
-Calendar.strftime(datetime, "%Y-%m-%d")  # "2025-03-16"
-```
-
-### Process Essentials
-
-```elixir
-self()                                   # Current process PID
-Process.send_after(pid, :msg, 5_000)     # Send message after 5s
-Process.alive?(pid)                      # Is process running?
-Process.monitor(pid)                     # Monitor for :DOWN messages
-Process.link(pid)                        # Bidirectional link (crash together)
-spawn(fn -> work() end)                  # Fire-and-forget (no linking!)
-spawn_link(fn -> work() end)             # Linked — crashes propagate
-Task.async(fn -> work() end) |> Task.await()  # Async with result
-```
-
-## Erlang Standard Library
-
-```elixir
-# :timer — delays and periodic work
-:timer.send_after(5_000, self(), :tick)     # Send message after 5s
-:timer.apply_after(1_000, Module, :fun, []) # Call function after 1s
-{time_us, result} = :timer.tc(fn -> work() end)  # Measure execution
-
-# :queue — efficient FIFO (O(1) amortized in/out)
-q = :queue.new() |> :queue.in(:a) |> :queue.in(:b)
-{{:value, :a}, q} = :queue.out(q)
-
-# :persistent_term — fast reads, expensive writes (global config)
-:persistent_term.put({MyApp, :config}, %{max_retries: 3})
-:persistent_term.get({MyApp, :config})
-
-# :ets — in-memory concurrent storage (see OTP section for patterns)
-:ets.new(:cache, [:named_table, :public, read_concurrency: true])
-:ets.insert(:cache, {key, value, System.monotonic_time()})
-:ets.lookup(:cache, key)  # [{key, value, timestamp}]
-
-# :crypto — most common operations (OTP 24+)
-:crypto.strong_rand_bytes(32)                   # Secure random bytes
-:crypto.hash(:sha256, data)                     # SHA-256 hash
-:crypto.mac(:hmac, :sha256, key, message)       # HMAC-SHA256
-{ct, tag} = :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, plain, aad, true)  # AEAD encrypt
-{pub, priv} = :crypto.generate_key(:ecdh, :x25519)  # ECDH keypair
-```
-
-> **Deep dive:** [quick-references.md](quick-references.md) — full :crypto reference with ECDH key exchange,
-> AEAD encryption/decryption (AES-GCM, ChaCha20-Poly1305), Ed25519 signatures, HKDF key derivation,
-> hash algorithm table, key/nonce/tag size requirements, common pitfalls, decision table.
-
-> **Deep dive:** [quick-references.md](quick-references.md) — :queue (in_r, out_r, peek, to_list, O(n) warnings),
-> :persistent_term (erase, info, hydration pattern), :atomics (CAS, lock-free rate limiting),
-> :counters (write-optimized vs atomic modes), :ets (CRUD, match specs, pattern literals vs guards,
-> owner process, DETS hydration, select_delete), :dets (disk-based ETS), :ordsets (sorted unique sets,
-> compiler usage), :digraph (vertices, edges, topsort, cycle detection, try/after cleanup),
-> :gb_trees (sorted KV, smallest/largest), :array (sparse, dynamic), :math (trig, log, pow),
-> :rand (uniform, uniform_real), :binary (compile_pattern, split, match, replace),
-> :erlang (term_to_binary with :safe, phash2 sharding, unique_integer, system_info, memory),
-> :lists (reverse/2, keyfind, usort, mapfoldl), :timer (tc, send_interval, unit conversions),
-> :crypto (strong_rand_bytes, hash, HMAC), :io_lib (format strings, hex/padded numbers),
-> :calendar (gregorian_seconds, day_of_week, valid_date), :unicode (NFC/NFD normalization),
-> :zlib (gzip/gunzip, compress/uncompress), :os (type detection), :telemetry (execute, span,
-> attach/attach_many), :sys (get_state, replace_state, trace), :file (consult, format_error,
-> code.priv_dir), Erlang data structure selection guide with complexity table
-
-## JSON Encoding
-
-```elixir
-# Built-in JSON module (Elixir 1.18+)
-JSON.encode!(%{name: "test", age: 30})
-JSON.decode!(~s({"name":"test"}))
-```
-
 ## Anti-Patterns to Avoid
 
 ### Imperative Habits (Most Common LLM Mistakes)
@@ -2546,6 +2451,57 @@ case result do
 end
 ```
 
+### Library & API Design Anti-Patterns
+
+```elixir
+# BAD: Non-bang function raises instead of returning error tuple
+# Users expect deliver_now/1 to return {:ok, _} | {:error, _}
+def deliver_now(email) do
+  if email.to == [] do
+    raise "no recipients"  # Surprise! Non-bang function raises
+  end
+  # ...
+end
+
+# GOOD: Non-bang returns tuples, bang raises
+def deliver_now(email) do
+  case validate_and_send(email) do
+    {:ok, result} -> {:ok, result}
+    {:error, _} = err -> err
+  end
+end
+
+def deliver_now!(email) do
+  case deliver_now(email) do
+    {:ok, result} -> result
+    {:error, reason} -> raise "Delivery failed: #{inspect(reason)}"
+  end
+end
+
+# BAD: Application.get_env in module body of a LIBRARY
+# Captures value at compile time — consumers can't configure after compilation
+defmodule MyLib.Client do
+  @api_key Application.get_env(:my_lib, :api_key)  # Baked in at compile time!
+
+  def call, do: request(@api_key)
+end
+
+# GOOD: Read at runtime for libraries
+defmodule MyLib.Client do
+  def call do
+    api_key = Application.get_env(:my_lib, :api_key)
+    request(api_key)
+  end
+end
+
+# GOOD: For application code (not libraries), compile_env is fine
+defmodule MyApp.Client do
+  @api_key Application.compile_env!(:my_app, :api_key)  # OK — you control the build
+end
+```
+
+**Rule of thumb:** Libraries use `Application.get_env` at runtime. Applications can use `Application.compile_env` at compile time. The difference: library consumers configure *after* the library is compiled; application config is set *before* compilation.
+
 ### Data Structure Anti-Patterns
 
 ```elixir
@@ -2566,46 +2522,17 @@ items |> Enum.map(&["Item: ", &1, "\n"]) |> IO.iodata_to_binary()
 
 ## State Machines
 
-> For comprehensive guidance, use the `state-machine` skill.
+> For comprehensive guidance (gen_statem, GenStateMachine, AshStateMachine, fsmx, testing), use the **[state-machine](../state-machine/SKILL.md)** skill.
 
-**Use when:** lifecycle management (orders, subscriptions, documents), protocol implementation (TCP, auth flows, 2PC), resource management (circuit breakers, connection pools), hardware/device control (motors, sensors). **Skip when:** simple CRUD, boolean flags, no meaningful transitions.
-
-| Approach | Best For | Trade-off |
-|----------|----------|-----------|
-| **gen_statem / GenStateMachine** | Process-based FSM, timeouts, concurrent state | Full OTP power, more boilerplate |
-| **AshStateMachine** | Ash Framework resources | Declarative, integrates with Ash policies |
-| **fsmx / Machinery** | Ecto schemas with state field | Lightweight, database-backed |
-| **Pure pattern matching** | Simple state transitions | Minimal deps, manual validation |
+**Use when:** lifecycle management (orders, subscriptions), protocol implementation, resource management (circuit breakers). **Skip when:** simple CRUD, boolean flags.
 
 ```elixir
-# BAD: State logic scattered across conditionals
-def process(order, action) do
-  cond do
-    order.state == :pending and action == :confirm -> confirm(order)
-    order.state == :confirmed and action == :ship -> ship(order)
-    true -> {:error, :invalid_action}
-  end
-end
-
-# GOOD: Pure function state machine (no process needed)
+# Pure function state machine (no process needed)
 defmodule Order do
   defstruct state: :pending, id: nil
   def transition(%{state: :pending} = o, :confirm), do: {:ok, %{o | state: :confirmed}}
-  def transition(%{state: :pending} = o, :cancel),  do: {:ok, %{o | state: :cancelled}}
   def transition(%{state: :confirmed} = o, :ship),  do: {:ok, %{o | state: :shipped}}
   def transition(_, _), do: {:error, :invalid_transition}
-end
-
-# GOOD: GenStateMachine (when you need process, timeouts, concurrent access)
-defmodule OrderFSM do
-  use GenStateMachine, callback_mode: :state_functions
-  def start_link(id), do: GenStateMachine.start_link(__MODULE__, id)
-  def confirm(pid), do: GenStateMachine.call(pid, :confirm)
-
-  @impl true
-  def init(id), do: {:ok, :pending, %{id: id}}
-  def pending({:call, from}, :confirm, data),
-    do: {:next_state, :confirmed, data, [{:reply, from, :ok}]}
   def pending({:call, from}, :cancel, data),
     do: {:next_state, :cancelled, data, [{:reply, from, :ok}]}
 end

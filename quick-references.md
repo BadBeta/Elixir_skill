@@ -94,6 +94,7 @@ Enum.min_by(enum, fun)           # Element with minimum key
 Enum.max_by(enum, fun)           # Element with maximum key
 Enum.min_max(enum)               # {min, max}
 Enum.min_max_by(enum, fun)       # {min_element, max_element}
+Enum.slide(enum, index, to)      # Move element to new position (1.13+)
 ```
 
 #### Group & Split
