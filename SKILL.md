@@ -2292,7 +2292,14 @@ from(p in Post,
 ### Common Mistakes (BAD/GOOD)
 
 ```elixir
-# BAD: N+1 queries
+# BAD: N+1 queries — use preload, not lazy loading in loops
+users = Repo.all(User)
+Enum.map(users, fn u -> u.posts end)  # N+1!
+
+# GOOD: Preload
+users = User |> preload(:posts) |> Repo.all()
+```
+
 ## Testing
 
 > **Supporting files:** Quick-reference in [testing-reference.md](testing-reference.md). Complete examples in [testing-examples.md](testing-examples.md).
