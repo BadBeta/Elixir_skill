@@ -2213,15 +2213,6 @@ JSON.decode!(~s({"name":"test"}))
 
 > **Full reference:** [quick-references.md](quick-references.md) — complete Enum (30+ functions), Map, Keyword, List, String (graphemes vs codepoints, byte_size, normalize), Regex (named captures, compile), File/Path/System, URI/Base, Date/Time (strftime, shift), IO/Inspect, Access/Nested Data (get_in/put_in with Access.all/filter/key), Process, Application/Code, Macro/Module (prewalk/postwalk), Agent, Kernel helpers (tap/then/dbg), 21 Erlang modules (:crypto with ECDH/AEAD/Ed25519/HKDF, :ets match specs, :queue, :persistent_term, :atomics, :counters, :digraph, :gb_trees, :binary, :timer, :io_lib, :calendar, :unicode, :zlib, :telemetry, :sys), JSON encoding.
 
-## Advanced Patterns
-
-> Extended patterns from Req, Broadway, and Absinthe including bidirectional step pipelines, option registration, private data namespaces, error delegation, atomics for rate limiting, persistent term namespacing, status as tagged exception, collectable with streaming hash, caller acknowledger for testing, coordinated shutdown, telemetry integration, Plug halt semantics, Task.async_stream patterns, AST traversal, changeset semantics, and phase pipeline pattern.
-
-> **Deep dive:** [language-patterns.md](language-patterns.md) — sigils (~r, ~w, ~s, custom), comprehensions
-> (generators, filters, into:, reduce:, binary), Access module (all(), at(), filter(), key()),
-> dynamic dispatch, metaprogramming basics (quote/unquote, __ENV__, Module attributes),
-> Req bidirectional pipelines, Broadway patterns, option registration.
-
 ## Ecto & Database
 
 > **Supporting files:** Quick-reference tables in [ecto-reference.md](ecto-reference.md). Complete working examples in [ecto-examples.md](ecto-examples.md).
@@ -2302,6 +2293,116 @@ from(p in Post,
 
 ```elixir
 # BAD: N+1 queries
+## Testing
+
+> **Supporting files:** Quick-reference in [testing-reference.md](testing-reference.md). Complete examples in [testing-examples.md](testing-examples.md).
+
+### Rules for Writing Elixir Tests (LLM)
+
+1. **ALWAYS use `async: true`** unless the test modifies global state (ETS named tables, Application env, named GenServers).
+2. **ALWAYS use `Ecto.Adapters.SQL.Sandbox`** for database tests.
+3. **ALWAYS mock at system boundaries only** (HTTP clients, email, payment gateways). Never mock modules you own.
+4. **ALWAYS use `assert_receive`/`refute_receive` with explicit timeouts** instead of `Process.sleep`.
+5. **ALWAYS use `setup :verify_on_exit!`** with Mox.
+6. **ALWAYS use `errors_on/1` helper** to assert changeset errors.
+7. **NEVER test private functions directly.** Test through the public API.
+8. **ALWAYS use ExMachina factories** (or equivalent) for test data.
+9. **ALWAYS explicitly allow sandbox access** for spawned processes.
+10. **ALWAYS test LiveView through `live/2`** and assert with `has_element?/3`, `render_click/2`, `render_submit/2`.
+11. **ALWAYS use `describe` blocks** to group related tests.
+12. **NEVER leave flaky tests.** Fix the root cause.
+
+### ExUnit Fundamentals
+
+```elixir
+defmodule MyApp.UserTest do
+  use MyApp.DataCase, async: true
+
+  alias MyApp.Accounts
+  import MyApp.Factory
+
+  describe "create_user/1" do
+    setup do
+      %{valid_attrs: %{email: "test@example.com", name: "Test"}}
+    end
+
+    test "with valid attrs creates user", %{valid_attrs: attrs} do
+      assert {:ok, user} = Accounts.create_user(attrs)
+      assert user.email == attrs.email
+    end
+
+    test "with invalid attrs returns error changeset" do
+      assert {:error, changeset} = Accounts.create_user(%{})
+      assert %{email: ["can't be blank"]} = errors_on(changeset)
+    end
+  end
+end
+```
+
+### Key Assertions
+
+```elixir
+assert value                              # Truthy
+assert {:ok, result} = function()         # Pattern match + extract
+assert_raise RuntimeError, fn -> raise "oops" end
+assert_receive {:msg, payload}, 1000      # With timeout
+refute_receive :unexpected, 100
+assert %{email: ["can't be blank"]} = errors_on(changeset)
+```
+
+### Setup Patterns
+
+```elixir
+# Basic setup
+setup do
+  user = insert(:user)
+  %{user: user}
+end
+
+# Named setup
+setup :create_user
+defp create_user(_), do: %{user: insert(:user)}
+
+# Multiple setups
+setup [:create_user, :create_project, :verify_on_exit!]
+
+# start_supervised! — auto-stopped after test
+setup do
+  pid = start_supervised!({MyWorker, initial_state: []})
+  %{worker: pid}
+end
+```
+
+### Mox Pattern
+
+```elixir
+# Define behaviour → mock → test
+defmodule MyApp.HTTPClient do
+  @callback get(String.t()) :: {:ok, map()} | {:error, term()}
+end
+
+# test_helper.exs
+Mox.defmock(MyApp.HTTPClient.Mock, for: MyApp.HTTPClient)
+
+# In test
+import Mox
+setup :verify_on_exit!
+
+test "handles API response" do
+  expect(MyApp.HTTPClient.Mock, :get, fn url ->
+    assert url == "https://api.example.com/data"
+    {:ok, %{status: 200, body: %{"result" => "ok"}}}
+  end)
+  assert {:ok, _} = MyModule.fetch_data()
+end
+```
+
+> **Deep dive:** [testing-examples.md](testing-examples.md) — Mox patterns (expect, stub, verify_on_exit!),
+> Ecto sandbox (ownership, async mode, allowances), factory patterns (build/insert helpers), LiveView testing
+> (render, click, submit), channel testing (join, push, assert_push), Oban testing (perform_job, assert_enqueued),
+> OTP process testing (start_supervised!, GenServer testing), property-based testing with StreamData, BAD/GOOD pairs.
+
+
 ## Documentation & Doctests
 
 ### Rules for Documentation (LLM)
@@ -2501,6 +2602,16 @@ end
 See the [rust-nif skill](../rust-nif/SKILL.md) for Rust-side NIF patterns and the return type matrix.
 
 
+## Advanced Patterns
+
+> Extended patterns from Req, Broadway, and Absinthe including bidirectional step pipelines, option registration, private data namespaces, error delegation, atomics for rate limiting, persistent term namespacing, status as tagged exception, collectable with streaming hash, caller acknowledger for testing, coordinated shutdown, telemetry integration, Plug halt semantics, Task.async_stream patterns, AST traversal, changeset semantics, and phase pipeline pattern.
+
+> **Deep dive:** [language-patterns.md](language-patterns.md) — sigils (~r, ~w, ~s, custom), comprehensions
+> (generators, filters, into:, reduce:, binary), Access module (all(), at(), filter(), key()),
+> dynamic dispatch, metaprogramming basics (quote/unquote, __ENV__, Module attributes),
+> Req bidirectional pipelines, Broadway patterns, option registration.
+
+
 ## TCP/UDP Networking (Key Patterns)
 
 For socket programming with `:gen_tcp` and `:gen_udp`. Use `active: :once` for production servers, `active: false` for clients.
@@ -2551,115 +2662,6 @@ end
 > **ALWAYS read** [eventsourcing-reference.md](eventsourcing-reference.md) for rules, architecture, BAD/GOOD patterns, Commanded API, router DSL, middleware, projections, process managers, and mix tasks. Complete working examples in [eventsourcing-examples.md](eventsourcing-examples.md).
 
 **Use when:** complex domains with audit trails, undo/replay, event-driven integration. **Don't use for:** simple CRUD, static data, OLAP. **Hybrid:** event source only critical bounded contexts.
-
-## Testing
-
-> **Supporting files:** Quick-reference in [testing-reference.md](testing-reference.md). Complete examples in [testing-examples.md](testing-examples.md).
-
-### Rules for Writing Elixir Tests (LLM)
-
-1. **ALWAYS use `async: true`** unless the test modifies global state (ETS named tables, Application env, named GenServers).
-2. **ALWAYS use `Ecto.Adapters.SQL.Sandbox`** for database tests.
-3. **ALWAYS mock at system boundaries only** (HTTP clients, email, payment gateways). Never mock modules you own.
-4. **ALWAYS use `assert_receive`/`refute_receive` with explicit timeouts** instead of `Process.sleep`.
-5. **ALWAYS use `setup :verify_on_exit!`** with Mox.
-6. **ALWAYS use `errors_on/1` helper** to assert changeset errors.
-7. **NEVER test private functions directly.** Test through the public API.
-8. **ALWAYS use ExMachina factories** (or equivalent) for test data.
-9. **ALWAYS explicitly allow sandbox access** for spawned processes.
-10. **ALWAYS test LiveView through `live/2`** and assert with `has_element?/3`, `render_click/2`, `render_submit/2`.
-11. **ALWAYS use `describe` blocks** to group related tests.
-12. **NEVER leave flaky tests.** Fix the root cause.
-
-### ExUnit Fundamentals
-
-```elixir
-defmodule MyApp.UserTest do
-  use MyApp.DataCase, async: true
-
-  alias MyApp.Accounts
-  import MyApp.Factory
-
-  describe "create_user/1" do
-    setup do
-      %{valid_attrs: %{email: "test@example.com", name: "Test"}}
-    end
-
-    test "with valid attrs creates user", %{valid_attrs: attrs} do
-      assert {:ok, user} = Accounts.create_user(attrs)
-      assert user.email == attrs.email
-    end
-
-    test "with invalid attrs returns error changeset" do
-      assert {:error, changeset} = Accounts.create_user(%{})
-      assert %{email: ["can't be blank"]} = errors_on(changeset)
-    end
-  end
-end
-```
-
-### Key Assertions
-
-```elixir
-assert value                              # Truthy
-assert {:ok, result} = function()         # Pattern match + extract
-assert_raise RuntimeError, fn -> raise "oops" end
-assert_receive {:msg, payload}, 1000      # With timeout
-refute_receive :unexpected, 100
-assert %{email: ["can't be blank"]} = errors_on(changeset)
-```
-
-### Setup Patterns
-
-```elixir
-# Basic setup
-setup do
-  user = insert(:user)
-  %{user: user}
-end
-
-# Named setup
-setup :create_user
-defp create_user(_), do: %{user: insert(:user)}
-
-# Multiple setups
-setup [:create_user, :create_project, :verify_on_exit!]
-
-# start_supervised! — auto-stopped after test
-setup do
-  pid = start_supervised!({MyWorker, initial_state: []})
-  %{worker: pid}
-end
-```
-
-### Mox Pattern
-
-```elixir
-# Define behaviour → mock → test
-defmodule MyApp.HTTPClient do
-  @callback get(String.t()) :: {:ok, map()} | {:error, term()}
-end
-
-# test_helper.exs
-Mox.defmock(MyApp.HTTPClient.Mock, for: MyApp.HTTPClient)
-
-# In test
-import Mox
-setup :verify_on_exit!
-
-test "handles API response" do
-  expect(MyApp.HTTPClient.Mock, :get, fn url ->
-    assert url == "https://api.example.com/data"
-    {:ok, %{status: 200, body: %{"result" => "ok"}}}
-  end)
-  assert {:ok, _} = MyModule.fetch_data()
-end
-```
-
-> **Deep dive:** [testing-examples.md](testing-examples.md) — Mox patterns (expect, stub, verify_on_exit!),
-> Ecto sandbox (ownership, async mode, allowances), factory patterns (build/insert helpers), LiveView testing
-> (render, click, submit), channel testing (join, push, assert_push), Oban testing (perform_job, assert_enqueued),
-> OTP process testing (start_supervised!, GenServer testing), property-based testing with StreamData, BAD/GOOD pairs.
 
 ## Debugging
 
