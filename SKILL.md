@@ -662,6 +662,423 @@ end
 > [code-style.md](code-style.md) — .formatter.exs configuration, Credo checks catalog, readable code patterns,
 > pipeline readability, guard ordering, with-chain formatting, naming conventions.
 
+## Error Handling
+
+### ok/error Tuples
+
+The standard Elixir convention for results. Use atoms for error types, structs/maps for rich errors.
+
+```elixir
+# Return conventions — be consistent within a context
+{:ok, value}                        # Success with data
+:ok                                 # Success, no data (side-effect confirmation)
+{:error, :not_found}                # Typed failure (atom)
+{:error, %Changeset{}}              # Rich failure (struct with details)
+{:error, {reason, details}}         # Compound failure
+
+# Pattern match with case
+case Repo.fetch(User, id) do
+  {:ok, user} -> process(user)
+  {:error, :not_found} -> create_default(id)
+  {:error, reason} -> log_and_fail(reason)
+end
+
+# Bang (!) variants — raise on error, used when failure is unexpected
+user = Repo.get!(User, id)         # Raises Ecto.NoResultsError
+file = File.read!(path)            # Raises File.Error
+
+# Writing bang/non-bang pairs
+def fetch_config(key) do
+  case lookup(key) do
+    nil -> {:error, :not_found}
+    val -> {:ok, val}
+  end
+end
+
+def fetch_config!(key) do
+  case fetch_config(key) do
+    {:ok, val} -> val
+    {:error, reason} -> raise "Config #{key} failed: #{reason}"
+  end
+end
+
+# Wrapping external results
+with {:ok, resp} <- HTTPClient.get(url),
+     {:ok, body} <- Jason.decode(resp.body) do
+  {:ok, body}
+end
+# Returns the first {:error, _} from the chain automatically
+
+# Multi-clause functions — match directly on ok/error
+def handle_result({:ok, user}), do: send_welcome(user)
+def handle_result({:error, :not_found}), do: redirect_to_signup()
+def handle_result({:error, _reason}), do: show_generic_error()
+
+# Tagged tuples in with — label each step for targeted error handling
+with {:user, {:ok, user}} <- {:user, fetch_user(id)},
+     {:auth, :ok} <- {:auth, authorize(user, action)},
+     {:save, {:ok, result}} <- {:save, save(user)} do
+  {:ok, result}
+else
+  {:user, {:error, _}} -> {:error, :user_not_found}
+  {:auth, {:error, _}} -> {:error, :unauthorized}
+  {:save, {:error, changeset}} -> {:error, changeset}
+end
+
+# Filtering ok results from a list
+results = Enum.map(items, &process/1)
+successes = for {:ok, val} <- results, do: val
+failures = for {:error, reason} <- results, do: reason
+
+# ok/error in GenServer — pass through the tuple
+def handle_call(:get, _from, state) do
+  case compute(state) do
+    {:ok, result} -> {:reply, {:ok, result}, state}
+    {:error, _} = err -> {:reply, err, state}  # Capture and forward
+  end
+end
+```
+
+**When to use which:**
+- Non-bang (`fetch/1`) — caller decides how to handle failure
+- Bang (`fetch!/1`) — failure is a bug, crash early (scripts, seeds, known-good paths)
+- `:ok` atom — fire-and-forget side effects (logging, cache writes, sending messages)
+
+### Let It Crash
+
+Don't rescue unknown errors — let supervision handle it. Reserve `try/rescue` for system boundaries only.
+
+### Error Kernel Design
+
+Keep critical state in stable processes, volatile work in expendable ones:
+
+```elixir
+children = [
+  MyApp.ConfigStore,    # Stable kernel — rarely crashes
+  MyApp.Repo,
+  {DynamicSupervisor, name: MyApp.WorkerSupervisor}  # Volatile workers
+]
+Supervisor.start_link(children, strategy: :rest_for_one)
+```
+
+### defexception Patterns
+
+```elixir
+defmodule MyApp.NotFoundError do
+  defexception [:message, :resource, :id]
+
+  @impl true
+  def exception(opts) do
+    resource = Keyword.fetch!(opts, :resource)
+    id = Keyword.fetch!(opts, :id)
+    %__MODULE__{message: "#{resource} #{id} not found", resource: resource, id: id}
+  end
+end
+```
+
+> **Deep dive:** [language-patterns.md](language-patterns.md) — defexception patterns (message/1, custom fields),
+> ok/error tuple conventions, let it crash philosophy, error kernel design (separate error-prone from critical
+> state), exit reason classification (:normal, :shutdown, {:shutdown, term}), with-chain error handling,
+> rescue vs catch, reraise/3.
+
+
+
+## Anti-Patterns to Avoid
+
+### Imperative Habits (Most Common LLM Mistakes)
+
+```elixir
+# BAD: Enum.each to build result (returns :ok, not accumulated value)
+result = []
+Enum.each(items, fn item -> result = [process(item) | result] end)
+# result is still [] — rebinding doesn't work!
+
+# GOOD: Use Enum.map
+result = Enum.map(items, &process/1)
+
+# BAD: if/else chain for structural dispatch
+def handle(msg) do
+  if is_map(msg) and Map.has_key?(msg, :type) do
+    if msg.type == :error, do: handle_error(msg), else: handle_ok(msg)
+  end
+end
+
+# GOOD: Multi-clause functions
+def handle(%{type: :error} = msg), do: handle_error(msg)
+def handle(%{type: _} = msg), do: handle_ok(msg)
+
+# BAD: Mutable accumulator thinking
+count = 0
+Enum.each(items, fn _ -> count = count + 1 end)
+# count is still 0!
+
+# GOOD: Enum.count or Enum.reduce
+count = Enum.count(items)
+count = Enum.reduce(items, 0, fn _, acc -> acc + 1 end)
+
+# BAD: String concatenation in loops
+Enum.reduce(rows, "", fn row, acc -> acc <> format(row) <> "\n" end)
+
+# GOOD: IO lists
+rows |> Enum.map(fn row -> [format(row), ?\n] end) |> IO.iodata_to_binary()
+
+# BAD: try/rescue for expected failures
+try do
+  user = Repo.get!(User, id)
+rescue
+  Ecto.NoResultsError -> nil
+end
+
+# GOOD: ok/error pattern
+case Repo.get(User, id) do
+  nil -> {:error, :not_found}
+  user -> {:ok, user}
+end
+```
+
+### Process & OTP Anti-Patterns
+
+```elixir
+# BAD: GenServer as bottleneck for reads
+def get(key), do: GenServer.call(__MODULE__, {:get, key})
+# GOOD: Direct ETS access
+def get(key), do: :ets.lookup(__MODULE__, key)
+
+# BAD: Partial state update (crash between steps corrupts state)
+def handle_call(:transfer, _from, state) do
+  state = update_in(state.account_a, &(&1 - 100))
+  external_api_call()  # May crash here!
+  state = update_in(state.account_b, &(&1 + 100))
+  {:reply, :ok, state}
+end
+# GOOD: Atomic state update
+def handle_call(:transfer, _from, state) do
+  :ok = external_api_call()
+  new_state = state |> update_in([:account_a], &(&1 - 100)) |> update_in([:account_b], &(&1 + 100))
+  {:reply, :ok, new_state}
+end
+```
+
+### Control Flow Anti-Patterns
+
+```elixir
+# BAD: if/else instead of pattern matching
+def status(user), do: if user.active, do: :active, else: :inactive
+# GOOD
+def status(%{active: true}), do: :active
+def status(%{active: false}), do: :inactive
+
+# BAD: Boolean parameters obscure intent
+fetch_users(true)
+# GOOD: Separate functions with clear names
+fetch_active_users()
+```
+
+### Pattern Matching Gotchas
+
+```elixir
+# BAD: %{} matches ANY map, not just empty maps
+def handle(%{}), do: :empty       # Matches %{a: 1} too!
+# GOOD: Guard for empty map
+def handle(map) when map_size(map) == 0, do: :empty
+def handle(map), do: :has_keys
+
+# BAD: Atom keys don't match string keys (common with JSON/params)
+%{name: name} = %{"name" => "Jo"}  # MatchError!
+# GOOD: Match with the correct key type
+%{"name" => name} = params          # External data uses string keys
+%{name: name} = internal_map        # Internal data uses atom keys
+
+# BAD: Forgot pin — variable rebinds instead of matching
+expected = :ok
+case result do
+  expected -> :matched        # ALWAYS matches! expected rebinds to result
+end
+# GOOD: Pin to match against existing value
+case result do
+  ^expected -> :matched       # Only matches if result == :ok
+end
+```
+
+### Library & API Design Anti-Patterns
+
+```elixir
+# BAD: Non-bang function raises instead of returning error tuple
+# Users expect deliver_now/1 to return {:ok, _} | {:error, _}
+def deliver_now(email) do
+  if email.to == [] do
+    raise "no recipients"  # Surprise! Non-bang function raises
+  end
+  # ...
+end
+
+# GOOD: Non-bang returns tuples, bang raises
+def deliver_now(email) do
+  case validate_and_send(email) do
+    {:ok, result} -> {:ok, result}
+    {:error, _} = err -> err
+  end
+end
+
+def deliver_now!(email) do
+  case deliver_now(email) do
+    {:ok, result} -> result
+    {:error, reason} -> raise "Delivery failed: #{inspect(reason)}"
+  end
+end
+
+# BAD: Application.get_env in module body of a LIBRARY
+# Captures value at compile time — consumers can't configure after compilation
+defmodule MyLib.Client do
+  @api_key Application.get_env(:my_lib, :api_key)  # Baked in at compile time!
+
+  def call, do: request(@api_key)
+end
+
+# GOOD: Read at runtime for libraries
+defmodule MyLib.Client do
+  def call do
+    api_key = Application.get_env(:my_lib, :api_key)
+    request(api_key)
+  end
+end
+
+# GOOD: For application code (not libraries), compile_env is fine
+defmodule MyApp.Client do
+  @api_key Application.compile_env!(:my_app, :api_key)  # OK — you control the build
+end
+```
+
+**Rule of thumb:** Libraries use `Application.get_env` at runtime. Applications can use `Application.compile_env` at compile time. The difference: library consumers configure *after* the library is compiled; application config is set *before* compilation.
+
+### Data Structure Anti-Patterns
+
+```elixir
+# DANGEROUS: Atoms from user input (exhausts atom table ~1M limit)
+String.to_atom(user_input)
+Jason.decode!(json, keys: :atoms)
+# SAFE: to_existing_atom or explicit mapping
+String.to_existing_atom(user_input)
+Jason.decode!(json, keys: :strings)     # Default, safe
+
+# BAD: String concatenation in loops (O(n^2) — copies on every <>)
+Enum.reduce(items, "", fn i, acc -> acc <> "#{i}\n" end)
+# GOOD: IO lists (zero-copy accumulation)
+items |> Enum.map(&["Item: ", &1, "\n"]) |> IO.iodata_to_binary()
+```
+
+> **Deep dive:** [architecture-reference.md](architecture-reference.md) — full anti-patterns catalog with BAD/GOOD pairs for control flow (if/else chains, boolean params), pattern matching gotchas (empty maps, atom/string keys, keyword list order, integer/float, pin operator, IEEE 754 -0.0), cross-type comparisons (term ordering surprises), data structures (atom exhaustion, string concat), processes & OTP (GenServer bottleneck, blocking callbacks, unbounded mailbox, unsupervised processes, Task.async in GenServer), performance (N+1 queries, list as lookup table)
+
+
+## Code Organization
+
+### Module Structure
+
+```elixir
+defmodule MyApp.User do
+  @moduledoc "User management"
+
+  use Ecto.Schema
+  import Ecto.Changeset
+  alias MyApp.Repo
+
+  @derive {Jason.Encoder, only: [:id, :email]}
+
+  @type t :: %__MODULE__{}
+
+  schema "users" do
+    field :email, :string
+  end
+
+  @doc "Creates a user"
+  @spec create(map()) :: {:ok, t()} | {:error, Ecto.Changeset.t()}
+  def create(attrs), do: # ...
+
+  defp validate(changeset), do: # ...
+end
+```
+
+Order: @moduledoc, use/import/alias/require, module attributes, types, schema/struct, public functions with @doc/@spec, private functions.
+
+### Import Guidelines
+
+```elixir
+# BAD: Broad import pulls entire module into namespace
+import Bamboo.ApiError  # Which functions come from here vs local?
+
+# GOOD: alias for qualified calls (default choice)
+alias Bamboo.ApiError
+ApiError.build(response)
+
+# GOOD: import with :only for specific functions
+import Ecto.Changeset, only: [cast: 3, validate_required: 2]
+
+# EXCEPTION: DSL/macro modules designed for full import are fine
+import Ecto.Query        # Provides from/2, where/3, select/3 etc. — intended usage
+import Ecto.Changeset    # Provides cast/3, validate_*/2 etc. — intended usage
+import MyApp.Guards      # Custom guard macros — must be imported for guard clauses
+```
+
+**When to use each:**
+
+| Strategy | When |
+|---|---|
+| `alias` + qualified calls | Default — always prefer this |
+| `import ... only:` | Need unqualified calls for readability (small set) |
+| Full `import` | DSL/macro modules designed for it (Ecto.Query, guards, test helpers) |
+| `use` | Module provides `__using__` macro (Phoenix.Component, GenServer) |
+
+### Public vs Private Functions
+
+**Default to `defp`** — only promote to `def` when external callers need it.
+
+| | `def` (public) | `defp` (private) |
+|---|---|---|
+| **Visibility** | Callable from other modules | Only within defining module |
+| **Contract** | Part of module API — add `@doc` + `@spec` | Implementation detail — refactor freely |
+| **Testing** | Test directly | Test through public API only |
+| **Stability** | Changing breaks callers | Changing is safe |
+
+```elixir
+# Public API — small, stable surface
+defmodule MyApp.Accounts do
+  @doc "Registers a new user, sends welcome email."
+  @spec register(map()) :: {:ok, User.t()} | {:error, Changeset.t()}
+  def register(attrs) do
+    attrs
+    |> build_user()
+    |> validate_uniqueness()
+    |> insert_and_notify()
+  end
+
+  # Private — all implementation details
+  defp build_user(attrs), do: User.changeset(%User{}, attrs)
+  defp validate_uniqueness(changeset), do: unique_constraint(changeset, :email)
+  defp insert_and_notify(changeset) do
+    with {:ok, user} <- Repo.insert(changeset) do
+      Mailer.send_welcome(user)
+      {:ok, user}
+    end
+  end
+end
+```
+
+**Guidelines:**
+- A module's public API should be **as small as possible** — fewer public functions = easier to understand, test, and maintain
+- **Extract private helpers** when logic is reused within the module or when a function does more than one thing
+- **`do_` prefix** for recursive private helpers of a public function: `def transform(list)` → `defp do_transform(list, acc)`
+- **`maybe_` prefix** for conditional operations: `defp maybe_notify(user, true)`, `defp maybe_notify(_user, false)`
+- Functions called from other modules **must** be `def` — if you find yourself wanting to call `defp` from outside, rethink the module boundary
+- **Context modules** (Phoenix contexts) are the public API for a domain — keep controller-facing functions `def`, keep query-building and validation helpers `defp`
+
+### Naming
+
+- **Modules**: PascalCase (`MyApp.UserController`)
+- **Functions/Variables**: snake_case (`find_user_by_email`)
+- **Predicates**: End with `?` (`valid?`, `empty?`)
+- **Dangerous functions**: End with exclamation mark (`delete！`, `fetch！`)
+- **Atoms**: snake_case (`:user_not_found`)
+
 ## Application Architecture
 
 ### Rules for Application Architecture (LLM)
@@ -897,107 +1314,141 @@ lib/my_app/catalog/
 > (domain/service/web), pipeline architecture, behaviours as layer contracts, protocols as boundaries,
 > configuration (compile-time vs runtime, when to use compile_env vs fetch_env!), refactoring guide, component reuse.
 
-## Production Patterns
+## Behaviours, Callbacks & @impl
 
-### Telemetry (Key Pattern)
+### Rules for Behaviours (LLM)
 
-```elixir
-# Emit events
-:telemetry.execute([:my_app, :orders, :created], %{count: 1}, %{order_id: order.id})
+1. **ALWAYS use `@impl true`** on every callback implementation — catches typos and missing callbacks at compile time
+2. **Once you use `@impl` on ANY callback, you MUST use it on ALL callbacks** — the compiler warns about inconsistency
+3. **Use `@impl BehaviourModule`** (not `@impl true`) when implementing multiple behaviours with overlapping callback names
+4. **ALWAYS name parameters in `@callback` specs** — e.g., `key :: String.t()` not just `String.t()` — serves as documentation
+5. **NEVER use behaviour inheritance** — compose multiple small behaviours instead (Ecto adapter pattern)
+6. **ALWAYS pair `defoverridable` with `@behaviour`** when providing defaults in `__using__`
+7. **Use behaviours for module-level polymorphism** (adapters, strategies); use **protocols for data-level polymorphism** (dispatch on first argument's type)
+8. **Handle `@optional_callbacks` at call sites** with `function_exported?/3` — optional means the function may not exist
 
-# Instrument a block
-:telemetry.span([:my_app, :external_api], %{url: url}, fn ->
-  result = HTTPClient.get(url)
-  {result, %{status: result.status}}
-end)
-```
-
-### HTTP Clients
-
-**Req** is the modern default. Batteries included: JSON, retries, redirects, compression.
+### Key Patterns
 
 ```elixir
-# Simple
-resp = Req.get!("https://api.example.com/data")
+# Defining a behaviour
+defmodule MyApp.Storage do
+  @callback fetch(key :: String.t()) :: {:ok, term()} | {:error, :not_found}
+  @callback store(key :: String.t(), value :: term()) :: :ok | {:error, term()}
+  @optional_callbacks [store: 2]
+end
 
-# Reusable client
-client = Req.new(base_url: "https://api.example.com", auth: {:bearer, token}, retry: :transient)
-{:ok, resp} = Req.get(client, url: "/users")
-```
+# Implementing with @impl
+defmodule MyApp.Storage.ETS do
+  @behaviour MyApp.Storage
+  @impl true
+  def fetch(key), do: ...
+  @impl true
+  def store(key, value), do: ...
+end
 
-> **Deep dive:** [production.md](production.md) — telemetry deep-dive (attach handlers, span events, custom metrics),
-> built-in events table (Phoenix, Ecto, Oban, VM), metrics definitions (counter, sum, distribution, last_value),
-> HTTP client patterns (Req, Finch, middleware, retry), Req.Test mock/stub testing, reusable client construction.
-
-### Elixir as NIF Host
-
-When using Rust NIFs via Rustler, these Elixir-side patterns are critical:
-
-**Config-driven module swapping (test/prod):**
-```elixir
-# config/config.exs — default to real NIF
-config :my_app, native_module: MyApp.Native
-
-# config/test.exs — swap to mock
-config :my_app, native_module: MyApp.MockNative
-
-# In your context module — resolve at compile time
-defmodule MyApp.Node do
-  @native Application.compile_env!(:my_app, :native_module)
-
-  def start(config), do: @native.start(config)
+# Adapter pattern — runtime dispatch via config
+defmodule MyApp.Mailer.Dispatcher do
+  def send(to, subject, body) do
+    impl = Application.get_env(:my_app, :mailer, MyApp.Mailer.SMTP)
+    impl.send_email(to, subject, body)
+  end
 end
 ```
 
-**`Application.compile_env` vs `Application.get_env`:**
-- `compile_env` — inlined at compile time, Dialyzer can see the concrete module. Use for module swapping where you want compile-time guarantees.
-- `get_env` — resolved at runtime. Use when the value might change or when compile-time resolution isn't needed.
-- **Dialyzer caveat:** `compile_env` gives Dialyzer the concrete module type, so specs are checked. `get_env` returns `term()`, losing type info.
+### Behaviour + `use` Macro — Inject Defaults
 
-**Atom vs string keys across the NIF boundary:**
 ```elixir
-# BAD: Elixir maps with atom keys sent to Rust NifMap
-config = %{host: "localhost", port: 4001}
-# Rust NifMap expects string keys by default — runtime crash!
+defmodule MyApp.Plugin do
+  @callback handle(term()) :: {:ok, term()} | {:error, term()}
+  @callback name() :: String.t()
 
-# GOOD: Convert atom keys to strings before crossing the NIF boundary
-config = %{"host" => "localhost", "port" => 4001}
-
-# GOOD: Or use a NifStruct with a matching Elixir struct
-config = %MyApp.Config{host: "localhost", port: 4001}
-```
-
-**Mock behaviour pattern for NIFs:**
-```elixir
-# Define a behaviour for the NIF interface
-defmodule MyApp.NativeBehaviour do
-  @callback start(map()) :: {:ok, reference()} | {:error, String.t()}
-  @callback stop(reference()) :: :ok
+  defmacro __using__(_opts) do
+    quote do
+      @behaviour MyApp.Plugin
+      @impl true
+      def name, do: __MODULE__ |> Module.split() |> List.last()
+      defoverridable name: 0  # Implementers MAY override
+    end
+  end
 end
 
-# Real implementation loads the NIF
-defmodule MyApp.Native do
-  @behaviour MyApp.NativeBehaviour
-  use Rustler, otp_app: :my_app, crate: "my_nif"
-
+defmodule MyApp.Plugins.CSV do
+  use MyApp.Plugin  # Gets default name/0, must implement handle/1
   @impl true
-  def start(_config), do: :erlang.nif_error(:nif_not_loaded)
-  @impl true
-  def stop(_ref), do: :erlang.nif_error(:nif_not_loaded)
-end
-
-# Mock for testing
-defmodule MyApp.MockNative do
-  @behaviour MyApp.NativeBehaviour
-
-  @impl true
-  def start(_config), do: {:ok, make_ref()}
-  @impl true
-  def stop(_ref), do: :ok
+  def handle(data), do: {:ok, CSV.encode(data)}
 end
 ```
 
-See the [rust-nif skill](../rust-nif/SKILL.md) for Rust-side NIF patterns and the return type matrix.
+### Behaviour vs Protocol Decision
+
+| | Behaviour | Protocol |
+|---|---|---|
+| **Dispatch on** | Module identity (passed as config) | Data type of first argument |
+| **Testing** | Works with Mox | Does not work with Mox |
+| **When to use** | External services, adapters, strategies | Type-specific formatting, encoding, iteration |
+| **Example** | `HTTPClient`, `Mailer`, `Storage` | `Jason.Encoder`, `Enumerable`, `Inspect` |
+
+> **Deep dive:** [language-patterns.md](language-patterns.md) — multi-behaviour composition (Ecto adapter pattern),
+> dynamic dispatch patterns, DSL recipe (__using__ + accumulated attributes + @before_compile),
+> behaviour introspection (module_info, __info__), @optional_callbacks with function_exported?/3,
+> defoverridable patterns, testing behaviours with Mox.
+
+## Protocols
+
+### Rules for Protocols (LLM)
+
+1. **PREFER single-function protocols** — the vast majority of stdlib/library protocols define exactly 1 function
+2. **ALWAYS put `@derive` BEFORE `defstruct`** (or `schema`) — the compiler warns if it comes after
+3. **NEVER implement `for: Map` expecting it to match structs** — structs dispatch through `struct_impl_for/1`, not the Map implementation
+4. **Use `@fallback_to_any true`** only when there IS a sensible default
+5. **ALWAYS implement all 3 commands** in Collectable: `{:cont, elem}`, `:done`, `:halt`
+6. **For Enumerable, return `{:error, __MODULE__}`** from `count/1`, `member?/2`, `slice/1` when O(1) isn't possible
+7. **Use `Protocol.derive/3`** for structs you don't own
+8. **Guard `for: BitString` implementations** with `is_binary/1`
+
+### Key Patterns
+
+```elixir
+# Define protocol
+defprotocol MyApp.Renderable do
+  @spec render(t()) :: iodata()
+  def render(term)
+end
+
+# Implement for struct
+defimpl MyApp.Renderable, for: MyApp.Widget do
+  def render(%{html: html}), do: html
+end
+
+# @derive for common protocols
+defmodule User do
+  @derive {Jason.Encoder, only: [:id, :name, :email]}
+  @derive {Inspect, only: [:id, :name]}
+  defstruct [:id, :name, :email, :password_hash]
+end
+
+# @fallback_to_any — sensible default for all types
+defprotocol MyApp.Blank do
+  @fallback_to_any true
+  def blank?(term)
+end
+
+defimpl MyApp.Blank, for: Any do
+  def blank?(_), do: false  # Default: nothing is blank
+end
+
+defimpl MyApp.Blank, for: [BitString, List] do
+  def blank?(""), do: true
+  def blank?([]), do: true
+  def blank?(_), do: false
+end
+```
+
+> **Deep dive:** [language-patterns.md](language-patterns.md) — making derivable protocols, Enumerable/Collectable
+> implementation, struct dispatch precedence (struct impl beats Map impl), protocol introspection
+> (Protocol.consolidated?/1, impl_for/1), consolidation behavior differences in dev vs prod,
+> Protocol.derive/3 for structs you don't own, multi-type implementation syntax.
+
 
 ## OTP Patterns
 
@@ -1270,141 +1721,6 @@ for pid <- Process.list(),
 > graceful shutdown, distribution patterns. [otp-advanced.md](otp-advanced.md) — GenStage, Flow, Broadway,
 > hot code upgrades.
 
-## TCP/UDP Networking (Key Patterns)
-
-For socket programming with `:gen_tcp` and `:gen_udp`. Use `active: :once` for production servers, `active: false` for clients.
-
-| Active mode | Data delivery | Backpressure | Use when |
-|---|---|---|---|
-| `{active, false}` | Manual `:gen_tcp.recv/2,3` | Full control | Clients, sequential protocols |
-| `{active, :once}` | One `{:tcp, socket, data}` then pauses | Per-message | **Most production servers** |
-| `{active, N}` | N messages then `{:tcp_passive, socket}` | Batched | High throughput (OTP 17+) |
-| `{active, true}` | Unlimited messages | **NONE** | Trusted LAN, benchmarks |
-
-```elixir
-# active: :once pattern — re-arm after each message
-def handle_info({:tcp, socket, data}, state) do
-  state = process_data(data, state)
-  :inet.setopts(socket, active: :once)    # Re-arm for next message
-  {:noreply, state}
-end
-def handle_info({:tcp_closed, _socket}, state), do: {:stop, :normal, state}
-def handle_info({:tcp_error, _socket, reason}, state), do: {:stop, reason, state}
-```
-
-> **Deep dive:** [networking.md](networking.md) — gen_tcp/gen_udp API reference, listener/acceptor patterns,
-> protocol framing (length-prefix, delimiter, TLV), buffer management, connection supervision,
-> UDP broadcast/multicast, Thousand Island/Ranch, BAD/GOOD pairs.
-
-## Code Organization
-
-### Module Structure
-
-```elixir
-defmodule MyApp.User do
-  @moduledoc "User management"
-
-  use Ecto.Schema
-  import Ecto.Changeset
-  alias MyApp.Repo
-
-  @derive {Jason.Encoder, only: [:id, :email]}
-
-  @type t :: %__MODULE__{}
-
-  schema "users" do
-    field :email, :string
-  end
-
-  @doc "Creates a user"
-  @spec create(map()) :: {:ok, t()} | {:error, Ecto.Changeset.t()}
-  def create(attrs), do: # ...
-
-  defp validate(changeset), do: # ...
-end
-```
-
-Order: @moduledoc, use/import/alias/require, module attributes, types, schema/struct, public functions with @doc/@spec, private functions.
-
-### Import Guidelines
-
-```elixir
-# BAD: Broad import pulls entire module into namespace
-import Bamboo.ApiError  # Which functions come from here vs local?
-
-# GOOD: alias for qualified calls (default choice)
-alias Bamboo.ApiError
-ApiError.build(response)
-
-# GOOD: import with :only for specific functions
-import Ecto.Changeset, only: [cast: 3, validate_required: 2]
-
-# EXCEPTION: DSL/macro modules designed for full import are fine
-import Ecto.Query        # Provides from/2, where/3, select/3 etc. — intended usage
-import Ecto.Changeset    # Provides cast/3, validate_*/2 etc. — intended usage
-import MyApp.Guards      # Custom guard macros — must be imported for guard clauses
-```
-
-**When to use each:**
-
-| Strategy | When |
-|---|---|
-| `alias` + qualified calls | Default — always prefer this |
-| `import ... only:` | Need unqualified calls for readability (small set) |
-| Full `import` | DSL/macro modules designed for it (Ecto.Query, guards, test helpers) |
-| `use` | Module provides `__using__` macro (Phoenix.Component, GenServer) |
-
-### Public vs Private Functions
-
-**Default to `defp`** — only promote to `def` when external callers need it.
-
-| | `def` (public) | `defp` (private) |
-|---|---|---|
-| **Visibility** | Callable from other modules | Only within defining module |
-| **Contract** | Part of module API — add `@doc` + `@spec` | Implementation detail — refactor freely |
-| **Testing** | Test directly | Test through public API only |
-| **Stability** | Changing breaks callers | Changing is safe |
-
-```elixir
-# Public API — small, stable surface
-defmodule MyApp.Accounts do
-  @doc "Registers a new user, sends welcome email."
-  @spec register(map()) :: {:ok, User.t()} | {:error, Changeset.t()}
-  def register(attrs) do
-    attrs
-    |> build_user()
-    |> validate_uniqueness()
-    |> insert_and_notify()
-  end
-
-  # Private — all implementation details
-  defp build_user(attrs), do: User.changeset(%User{}, attrs)
-  defp validate_uniqueness(changeset), do: unique_constraint(changeset, :email)
-  defp insert_and_notify(changeset) do
-    with {:ok, user} <- Repo.insert(changeset) do
-      Mailer.send_welcome(user)
-      {:ok, user}
-    end
-  end
-end
-```
-
-**Guidelines:**
-- A module's public API should be **as small as possible** — fewer public functions = easier to understand, test, and maintain
-- **Extract private helpers** when logic is reused within the module or when a function does more than one thing
-- **`do_` prefix** for recursive private helpers of a public function: `def transform(list)` → `defp do_transform(list, acc)`
-- **`maybe_` prefix** for conditional operations: `defp maybe_notify(user, true)`, `defp maybe_notify(_user, false)`
-- Functions called from other modules **must** be `def` — if you find yourself wanting to call `defp` from outside, rethink the module boundary
-- **Context modules** (Phoenix contexts) are the public API for a domain — keep controller-facing functions `def`, keep query-building and validation helpers `defp`
-
-### Naming
-
-- **Modules**: PascalCase (`MyApp.UserController`)
-- **Functions/Variables**: snake_case (`find_user_by_email`)
-- **Predicates**: End with `?` (`valid?`, `empty?`)
-- **Dangerous functions**: End with exclamation mark (`delete！`, `fetch！`)
-- **Atoms**: snake_case (`:user_not_found`)
-
 ## Code Style, Formatter & Readability
 
 ### Rules for Code Style (LLM)
@@ -1503,188 +1819,133 @@ config = %__MODULE__{timeout: Keyword.get(opts, :timeout, @default_timeout)}
 > **idiomatic formatter readability** (intermediate variables, natural break points, then/1, whitespace
 > paragraphs), pipeline readability, guard clause ordering, with-chain formatting, variable naming.
 
-## Behaviours, Callbacks & @impl
+## Stream, Enum, and the Enumerable Protocol
 
-### Rules for Behaviours (LLM)
+### When to Use Stream vs Enum
 
-1. **ALWAYS use `@impl true`** on every callback implementation — catches typos and missing callbacks at compile time
-2. **Once you use `@impl` on ANY callback, you MUST use it on ALL callbacks** — the compiler warns about inconsistency
-3. **Use `@impl BehaviourModule`** (not `@impl true`) when implementing multiple behaviours with overlapping callback names
-4. **ALWAYS name parameters in `@callback` specs** — e.g., `key :: String.t()` not just `String.t()` — serves as documentation
-5. **NEVER use behaviour inheritance** — compose multiple small behaviours instead (Ecto adapter pattern)
-6. **ALWAYS pair `defoverridable` with `@behaviour`** when providing defaults in `__using__`
-7. **Use behaviours for module-level polymorphism** (adapters, strategies); use **protocols for data-level polymorphism** (dispatch on first argument's type)
-8. **Handle `@optional_callbacks` at call sites** with `function_exported?/3` — optional means the function may not exist
-
-### Key Patterns
+| Use `Stream` when | Use `Enum` when |
+|---|---|
+| Large/infinite data | Small collections (< 10K) |
+| File processing line-by-line | Result needed immediately |
+| Multiple transformations on large data | Simple map/filter/reduce |
+| Need to limit (take first N) | Need all results |
 
 ```elixir
-# Defining a behaviour
-defmodule MyApp.Storage do
-  @callback fetch(key :: String.t()) :: {:ok, term()} | {:error, :not_found}
-  @callback store(key :: String.t(), value :: term()) :: :ok | {:error, term()}
-  @optional_callbacks [store: 2]
-end
+# Stream for large files — lazy, processes one line at a time
+File.stream!("huge.csv")
+|> Stream.map(&String.trim/1)
+|> Stream.reject(&(&1 == ""))
+|> Stream.take(1000)
+|> Enum.to_list()
 
-# Implementing with @impl
-defmodule MyApp.Storage.ETS do
-  @behaviour MyApp.Storage
-  @impl true
-  def fetch(key), do: ...
-  @impl true
-  def store(key, value), do: ...
-end
+# Stream.iterate — infinite sequence from seed
+Stream.iterate(1, &(&1 * 2)) |> Enum.take(10)  # [1, 2, 4, 8, 16, ...]
 
-# Adapter pattern — runtime dispatch via config
-defmodule MyApp.Mailer.Dispatcher do
-  def send(to, subject, body) do
-    impl = Application.get_env(:my_app, :mailer, MyApp.Mailer.SMTP)
-    impl.send_email(to, subject, body)
-  end
-end
+# Stream.unfold — generate from state, stop with nil
+Stream.unfold(10, fn
+  0 -> nil                        # Stop
+  n -> {n, n - 1}                 # {emit, next_state}
+end) |> Enum.to_list()            # [10, 9, 8, ..., 1]
+
+# Stream.resource — acquire/generate/cleanup (DB cursors, API pagination)
+Stream.resource(
+  fn -> fetch_page(1) end,                          # init: first page
+  fn
+    {[], _page} -> {:halt, nil}                     # no more items → stop
+    {[h | t], page} -> {[h], {t, page}}             # emit one item
+    {_, page} -> {[], fetch_page(page + 1)}         # fetch next page (not shown as practical)
+  end,
+  fn _ -> :ok end                                   # cleanup
+)
+
+# Endless generators — infinite streams consumed lazily
+random_floats = Stream.repeatedly(fn -> :rand.uniform() end)
+Enum.take(random_floats, 5)           # [0.234, 0.891, 0.112, ...]
+
+ids = Stream.iterate(1, &(&1 + 1))   # 1, 2, 3, 4, ... forever
+timestamps = Stream.repeatedly(fn -> DateTime.utc_now() end)
+
+# Combine infinite streams with data
+orders
+|> Stream.zip(ids)                    # {order, id} pairs
+|> Enum.take(100)                     # materialize only what you need
+
+# Pipeline: chain Stream, terminate with Enum
+orders
+|> Stream.filter(&(&1.status == :pending))
+|> Stream.map(&calculate_total/1)
+|> Stream.reject(&(&1.total == 0))
+|> Enum.sum()                     # Enum call triggers the lazy pipeline
+
+# Stream.chunk_while — variable-size chunks with custom logic
+# Group log lines into multi-line entries (entry starts with timestamp)
+File.stream!("app.log")
+|> Stream.chunk_while([], fn
+  line, [] -> {:cont, [line]}
+  <<d, _::binary>> = line, acc when d in ?0..?9 -> {:cont, Enum.reverse(acc), [line]}
+  line, acc -> {:cont, [line | acc]}
+end, fn acc -> {:cont, Enum.reverse(acc), []} end)
+
+# Stream.transform — stateful stream transformation
+# Rate-limit: emit at most 10 items per second
+Stream.transform(items, fn -> :ok end, fn item, acc ->
+  Process.sleep(100)
+  {[item], acc}
+end, fn _acc -> :ok end)
 ```
 
-### Behaviour + `use` Macro — Inject Defaults
+> **Deep dive:** [language-patterns.md](language-patterns.md) — Enumerable protocol implementation (reduce/3,
+> count/1, member?/2, slice/1), stream creators (iterate, unfold, resource), stream transforms (chunk_while,
+> transform), consuming streams safely, practical stream patterns (file processing, pagination, rate limiting),
+> Collectable protocol, lazy evaluation gotchas.
+
+## Recursion Patterns
+
+**Rule: Prefer Enum functions.** Use recursion only when you need early termination with complex conditions, multiple accumulators, or tree/graph traversal. Use `Stream` for infinite/generative sequences.
+
+**Tail call optimization (TCO):** When a function's last expression is a call to itself, the BEAM reuses the stack frame — constant memory, no stack overflow regardless of depth.
+
+- Operations after the call break TCO — `[h | func(t)]` is NOT tail-recursive (cons happens after return). Accumulate and reverse instead.
+- `try/rescue/catch` blocks prevent TCO — the BEAM keeps the frame for exception handling.
+- Stack traces lose intermediate frames — reused frames mean you won't see every recursion step in crash traces.
+- `case`, `if`, `with` around the call are fine — TCO applies as long as the recursive call is last in whichever branch executes.
 
 ```elixir
-defmodule MyApp.Plugin do
-  @callback handle(term()) :: {:ok, term()} | {:error, term()}
-  @callback name() :: String.t()
+# Accumulator pattern (tail-recursive)
+def sum(list), do: sum(list, 0)
+defp sum([], acc), do: acc
+defp sum([head | tail], acc), do: sum(tail, acc + head)
 
-  defmacro __using__(_opts) do
-    quote do
-      @behaviour MyApp.Plugin
-      @impl true
-      def name, do: __MODULE__ |> Module.split() |> List.last()
-      defoverridable name: 0  # Implementers MAY override
-    end
-  end
-end
+# Build-and-reverse (building a list)
+# Prepending [new | list] is O(1). Appending list ++ [new] is O(n).
+# Build reversed, reverse once at the end.
+def transform(list), do: do_transform(list, [])
+defp do_transform([], acc), do: Enum.reverse(acc)
+defp do_transform([h | t], acc), do: do_transform(t, [process(h) | acc])
 
-defmodule MyApp.Plugins.CSV do
-  use MyApp.Plugin  # Gets default name/0, must implement handle/1
-  @impl true
-  def handle(data), do: {:ok, CSV.encode(data)}
+# Multiple accumulators
+def partition(list), do: partition(list, [], [])
+defp partition([], evens, odds), do: {Enum.reverse(evens), Enum.reverse(odds)}
+defp partition([h | t], evens, odds) do
+  if rem(h, 2) == 0,
+    do: partition(t, [h | evens], odds),
+    else: partition(t, evens, [h | odds])
 end
+# But prefer: Enum.split_with(list, &(rem(&1, 2) == 0))
+
+# Tree traversal (recursion is the right tool)
+def flatten_tree(%{children: children, value: value}) do
+  [value | Enum.flat_map(children, &flatten_tree/1)]
+end
+def flatten_tree(%{value: value}), do: [value]
+
+# Infinite generation - use Stream, not raw recursion
+def fibonacci do
+  Stream.unfold({0, 1}, fn {a, b} -> {a, {b, a + b}} end)
+end
+# Enum.take(fibonacci(), 10) => [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
 ```
 
-### Behaviour vs Protocol Decision
-
-| | Behaviour | Protocol |
-|---|---|---|
-| **Dispatch on** | Module identity (passed as config) | Data type of first argument |
-| **Testing** | Works with Mox | Does not work with Mox |
-| **When to use** | External services, adapters, strategies | Type-specific formatting, encoding, iteration |
-| **Example** | `HTTPClient`, `Mailer`, `Storage` | `Jason.Encoder`, `Enumerable`, `Inspect` |
-
-> **Deep dive:** [language-patterns.md](language-patterns.md) — multi-behaviour composition (Ecto adapter pattern),
-> dynamic dispatch patterns, DSL recipe (__using__ + accumulated attributes + @before_compile),
-> behaviour introspection (module_info, __info__), @optional_callbacks with function_exported?/3,
-> defoverridable patterns, testing behaviours with Mox.
-
-## Protocols
-
-### Rules for Protocols (LLM)
-
-1. **PREFER single-function protocols** — the vast majority of stdlib/library protocols define exactly 1 function
-2. **ALWAYS put `@derive` BEFORE `defstruct`** (or `schema`) — the compiler warns if it comes after
-3. **NEVER implement `for: Map` expecting it to match structs** — structs dispatch through `struct_impl_for/1`, not the Map implementation
-4. **Use `@fallback_to_any true`** only when there IS a sensible default
-5. **ALWAYS implement all 3 commands** in Collectable: `{:cont, elem}`, `:done`, `:halt`
-6. **For Enumerable, return `{:error, __MODULE__}`** from `count/1`, `member?/2`, `slice/1` when O(1) isn't possible
-7. **Use `Protocol.derive/3`** for structs you don't own
-8. **Guard `for: BitString` implementations** with `is_binary/1`
-
-### Key Patterns
-
-```elixir
-# Define protocol
-defprotocol MyApp.Renderable do
-  @spec render(t()) :: iodata()
-  def render(term)
-end
-
-# Implement for struct
-defimpl MyApp.Renderable, for: MyApp.Widget do
-  def render(%{html: html}), do: html
-end
-
-# @derive for common protocols
-defmodule User do
-  @derive {Jason.Encoder, only: [:id, :name, :email]}
-  @derive {Inspect, only: [:id, :name]}
-  defstruct [:id, :name, :email, :password_hash]
-end
-
-# @fallback_to_any — sensible default for all types
-defprotocol MyApp.Blank do
-  @fallback_to_any true
-  def blank?(term)
-end
-
-defimpl MyApp.Blank, for: Any do
-  def blank?(_), do: false  # Default: nothing is blank
-end
-
-defimpl MyApp.Blank, for: [BitString, List] do
-  def blank?(""), do: true
-  def blank?([]), do: true
-  def blank?(_), do: false
-end
-```
-
-> **Deep dive:** [language-patterns.md](language-patterns.md) — making derivable protocols, Enumerable/Collectable
-> implementation, struct dispatch precedence (struct impl beats Map impl), protocol introspection
-> (Protocol.consolidated?/1, impl_for/1), consolidation behavior differences in dev vs prod,
-> Protocol.derive/3 for structs you don't own, multi-type implementation syntax.
-
-## Documentation & Doctests
-
-### Rules for Documentation (LLM)
-
-1. **ALWAYS add `@moduledoc`** to every public module — `@moduledoc false` for internal/private modules
-2. **ALWAYS add `@doc` and `@spec`** to every public function — `@doc false` for intentionally undocumented helpers
-3. **ALWAYS start `@moduledoc` and `@doc` with a concise summary line** — ExDoc uses the first paragraph for search/index
-4. **ALWAYS include `## Examples` with `iex>` doctests** for pure functions
-5. **ALWAYS place `@doc` before the FIRST clause** of multi-clause functions
-6. **ALWAYS pair `@deprecated` with `@doc false`** — hide deprecated functions from docs
-7. **NEVER write docs that just repeat the function name**
-8. **ALWAYS use backtick cross-references** — `` `Module` ``, `` `Module.function/arity` ``, `` `t:type/0` ``
-9. **ALWAYS document `:ok/:error` return shapes** explicitly
-10. **PREFER `@typedoc`** for complex or important types
-
-### Key Pattern
-
-```elixir
-@doc """
-Fetches a user by ID, preloading their organization.
-
-Returns `{:ok, user}` if found, `{:error, :not_found}` otherwise.
-
-## Examples
-
-    iex> MyApp.Accounts.get_user(123)
-    {:ok, %User{id: 123}}
-
-"""
-@spec get_user(pos_integer()) :: {:ok, User.t()} | {:error, :not_found}
-def get_user(id), do: ...
-```
-
-### Common @spec Patterns
-
-```elixir
-@spec process(String.t()) :: {:ok, map()} | {:error, atom()}
-@spec transform(list(A)) :: list(A) when A: term()          # Parametric
-@spec callback(term(), keyword()) :: :ok | no_return()       # Side-effectful
-@type result :: {:ok, t()} | {:error, reason()}              # Reusable type
-@type reason :: :not_found | :unauthorized | :invalid_input
-```
-
-> **Deep dive:** [documentation.md](documentation.md) — @moduledoc/@doc full patterns, @typedoc/@opaque types,
-> @since/@deprecated annotations, doctest syntax (multi-line, exceptions, opaque values, ellipsis matching
-> in 1.19+, omitting output), ExDoc configuration (groups_for_modules, extras, source_url, groups_for_docs),
-> cross-reference syntax (`t:MyMod.t/0`, `c:callback/1`, `m:Module`), documentation BAD/GOOD pairs.
 
 ## Data Structures & Access Patterns
 
@@ -1952,252 +2213,6 @@ JSON.decode!(~s({"name":"test"}))
 
 > **Full reference:** [quick-references.md](quick-references.md) — complete Enum (30+ functions), Map, Keyword, List, String (graphemes vs codepoints, byte_size, normalize), Regex (named captures, compile), File/Path/System, URI/Base, Date/Time (strftime, shift), IO/Inspect, Access/Nested Data (get_in/put_in with Access.all/filter/key), Process, Application/Code, Macro/Module (prewalk/postwalk), Agent, Kernel helpers (tap/then/dbg), 21 Erlang modules (:crypto with ECDH/AEAD/Ed25519/HKDF, :ets match specs, :queue, :persistent_term, :atomics, :counters, :digraph, :gb_trees, :binary, :timer, :io_lib, :calendar, :unicode, :zlib, :telemetry, :sys), JSON encoding.
 
-## Stream, Enum, and the Enumerable Protocol
-
-### When to Use Stream vs Enum
-
-| Use `Stream` when | Use `Enum` when |
-|---|---|
-| Large/infinite data | Small collections (< 10K) |
-| File processing line-by-line | Result needed immediately |
-| Multiple transformations on large data | Simple map/filter/reduce |
-| Need to limit (take first N) | Need all results |
-
-```elixir
-# Stream for large files — lazy, processes one line at a time
-File.stream!("huge.csv")
-|> Stream.map(&String.trim/1)
-|> Stream.reject(&(&1 == ""))
-|> Stream.take(1000)
-|> Enum.to_list()
-
-# Stream.iterate — infinite sequence from seed
-Stream.iterate(1, &(&1 * 2)) |> Enum.take(10)  # [1, 2, 4, 8, 16, ...]
-
-# Stream.unfold — generate from state, stop with nil
-Stream.unfold(10, fn
-  0 -> nil                        # Stop
-  n -> {n, n - 1}                 # {emit, next_state}
-end) |> Enum.to_list()            # [10, 9, 8, ..., 1]
-
-# Stream.resource — acquire/generate/cleanup (DB cursors, API pagination)
-Stream.resource(
-  fn -> fetch_page(1) end,                          # init: first page
-  fn
-    {[], _page} -> {:halt, nil}                     # no more items → stop
-    {[h | t], page} -> {[h], {t, page}}             # emit one item
-    {_, page} -> {[], fetch_page(page + 1)}         # fetch next page (not shown as practical)
-  end,
-  fn _ -> :ok end                                   # cleanup
-)
-
-# Endless generators — infinite streams consumed lazily
-random_floats = Stream.repeatedly(fn -> :rand.uniform() end)
-Enum.take(random_floats, 5)           # [0.234, 0.891, 0.112, ...]
-
-ids = Stream.iterate(1, &(&1 + 1))   # 1, 2, 3, 4, ... forever
-timestamps = Stream.repeatedly(fn -> DateTime.utc_now() end)
-
-# Combine infinite streams with data
-orders
-|> Stream.zip(ids)                    # {order, id} pairs
-|> Enum.take(100)                     # materialize only what you need
-
-# Pipeline: chain Stream, terminate with Enum
-orders
-|> Stream.filter(&(&1.status == :pending))
-|> Stream.map(&calculate_total/1)
-|> Stream.reject(&(&1.total == 0))
-|> Enum.sum()                     # Enum call triggers the lazy pipeline
-
-# Stream.chunk_while — variable-size chunks with custom logic
-# Group log lines into multi-line entries (entry starts with timestamp)
-File.stream!("app.log")
-|> Stream.chunk_while([], fn
-  line, [] -> {:cont, [line]}
-  <<d, _::binary>> = line, acc when d in ?0..?9 -> {:cont, Enum.reverse(acc), [line]}
-  line, acc -> {:cont, [line | acc]}
-end, fn acc -> {:cont, Enum.reverse(acc), []} end)
-
-# Stream.transform — stateful stream transformation
-# Rate-limit: emit at most 10 items per second
-Stream.transform(items, fn -> :ok end, fn item, acc ->
-  Process.sleep(100)
-  {[item], acc}
-end, fn _acc -> :ok end)
-```
-
-> **Deep dive:** [language-patterns.md](language-patterns.md) — Enumerable protocol implementation (reduce/3,
-> count/1, member?/2, slice/1), stream creators (iterate, unfold, resource), stream transforms (chunk_while,
-> transform), consuming streams safely, practical stream patterns (file processing, pagination, rate limiting),
-> Collectable protocol, lazy evaluation gotchas.
-
-## Recursion Patterns
-
-**Rule: Prefer Enum functions.** Use recursion only when you need early termination with complex conditions, multiple accumulators, or tree/graph traversal. Use `Stream` for infinite/generative sequences.
-
-**Tail call optimization (TCO):** When a function's last expression is a call to itself, the BEAM reuses the stack frame — constant memory, no stack overflow regardless of depth.
-
-- Operations after the call break TCO — `[h | func(t)]` is NOT tail-recursive (cons happens after return). Accumulate and reverse instead.
-- `try/rescue/catch` blocks prevent TCO — the BEAM keeps the frame for exception handling.
-- Stack traces lose intermediate frames — reused frames mean you won't see every recursion step in crash traces.
-- `case`, `if`, `with` around the call are fine — TCO applies as long as the recursive call is last in whichever branch executes.
-
-```elixir
-# Accumulator pattern (tail-recursive)
-def sum(list), do: sum(list, 0)
-defp sum([], acc), do: acc
-defp sum([head | tail], acc), do: sum(tail, acc + head)
-
-# Build-and-reverse (building a list)
-# Prepending [new | list] is O(1). Appending list ++ [new] is O(n).
-# Build reversed, reverse once at the end.
-def transform(list), do: do_transform(list, [])
-defp do_transform([], acc), do: Enum.reverse(acc)
-defp do_transform([h | t], acc), do: do_transform(t, [process(h) | acc])
-
-# Multiple accumulators
-def partition(list), do: partition(list, [], [])
-defp partition([], evens, odds), do: {Enum.reverse(evens), Enum.reverse(odds)}
-defp partition([h | t], evens, odds) do
-  if rem(h, 2) == 0,
-    do: partition(t, [h | evens], odds),
-    else: partition(t, evens, [h | odds])
-end
-# But prefer: Enum.split_with(list, &(rem(&1, 2) == 0))
-
-# Tree traversal (recursion is the right tool)
-def flatten_tree(%{children: children, value: value}) do
-  [value | Enum.flat_map(children, &flatten_tree/1)]
-end
-def flatten_tree(%{value: value}), do: [value]
-
-# Infinite generation - use Stream, not raw recursion
-def fibonacci do
-  Stream.unfold({0, 1}, fn {a, b} -> {a, {b, a + b}} end)
-end
-# Enum.take(fibonacci(), 10) => [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
-```
-
-## Error Handling
-
-### ok/error Tuples
-
-The standard Elixir convention for results. Use atoms for error types, structs/maps for rich errors.
-
-```elixir
-# Return conventions — be consistent within a context
-{:ok, value}                        # Success with data
-:ok                                 # Success, no data (side-effect confirmation)
-{:error, :not_found}                # Typed failure (atom)
-{:error, %Changeset{}}              # Rich failure (struct with details)
-{:error, {reason, details}}         # Compound failure
-
-# Pattern match with case
-case Repo.fetch(User, id) do
-  {:ok, user} -> process(user)
-  {:error, :not_found} -> create_default(id)
-  {:error, reason} -> log_and_fail(reason)
-end
-
-# Bang (!) variants — raise on error, used when failure is unexpected
-user = Repo.get!(User, id)         # Raises Ecto.NoResultsError
-file = File.read!(path)            # Raises File.Error
-
-# Writing bang/non-bang pairs
-def fetch_config(key) do
-  case lookup(key) do
-    nil -> {:error, :not_found}
-    val -> {:ok, val}
-  end
-end
-
-def fetch_config!(key) do
-  case fetch_config(key) do
-    {:ok, val} -> val
-    {:error, reason} -> raise "Config #{key} failed: #{reason}"
-  end
-end
-
-# Wrapping external results
-with {:ok, resp} <- HTTPClient.get(url),
-     {:ok, body} <- Jason.decode(resp.body) do
-  {:ok, body}
-end
-# Returns the first {:error, _} from the chain automatically
-
-# Multi-clause functions — match directly on ok/error
-def handle_result({:ok, user}), do: send_welcome(user)
-def handle_result({:error, :not_found}), do: redirect_to_signup()
-def handle_result({:error, _reason}), do: show_generic_error()
-
-# Tagged tuples in with — label each step for targeted error handling
-with {:user, {:ok, user}} <- {:user, fetch_user(id)},
-     {:auth, :ok} <- {:auth, authorize(user, action)},
-     {:save, {:ok, result}} <- {:save, save(user)} do
-  {:ok, result}
-else
-  {:user, {:error, _}} -> {:error, :user_not_found}
-  {:auth, {:error, _}} -> {:error, :unauthorized}
-  {:save, {:error, changeset}} -> {:error, changeset}
-end
-
-# Filtering ok results from a list
-results = Enum.map(items, &process/1)
-successes = for {:ok, val} <- results, do: val
-failures = for {:error, reason} <- results, do: reason
-
-# ok/error in GenServer — pass through the tuple
-def handle_call(:get, _from, state) do
-  case compute(state) do
-    {:ok, result} -> {:reply, {:ok, result}, state}
-    {:error, _} = err -> {:reply, err, state}  # Capture and forward
-  end
-end
-```
-
-**When to use which:**
-- Non-bang (`fetch/1`) — caller decides how to handle failure
-- Bang (`fetch!/1`) — failure is a bug, crash early (scripts, seeds, known-good paths)
-- `:ok` atom — fire-and-forget side effects (logging, cache writes, sending messages)
-
-### Let It Crash
-
-Don't rescue unknown errors — let supervision handle it. Reserve `try/rescue` for system boundaries only.
-
-### Error Kernel Design
-
-Keep critical state in stable processes, volatile work in expendable ones:
-
-```elixir
-children = [
-  MyApp.ConfigStore,    # Stable kernel — rarely crashes
-  MyApp.Repo,
-  {DynamicSupervisor, name: MyApp.WorkerSupervisor}  # Volatile workers
-]
-Supervisor.start_link(children, strategy: :rest_for_one)
-```
-
-### defexception Patterns
-
-```elixir
-defmodule MyApp.NotFoundError do
-  defexception [:message, :resource, :id]
-
-  @impl true
-  def exception(opts) do
-    resource = Keyword.fetch!(opts, :resource)
-    id = Keyword.fetch!(opts, :id)
-    %__MODULE__{message: "#{resource} #{id} not found", resource: resource, id: id}
-  end
-end
-```
-
-> **Deep dive:** [language-patterns.md](language-patterns.md) — defexception patterns (message/1, custom fields),
-> ok/error tuple conventions, let it crash philosophy, error kernel design (separate error-prone from critical
-> state), exit reason classification (:normal, :shutdown, {:shutdown, term}), with-chain error handling,
-> rescue vs catch, reraise/3.
-
 ## Advanced Patterns
 
 > Extended patterns from Req, Broadway, and Absinthe including bidirectional step pipelines, option registration, private data namespaces, error delegation, atomics for rate limiting, persistent term namespacing, status as tagged exception, collectable with streaming hash, caller acknowledger for testing, coordinated shutdown, telemetry integration, Plug halt semantics, Task.async_stream patterns, AST traversal, changeset semantics, and phase pipeline pattern.
@@ -2287,6 +2302,55 @@ from(p in Post,
 
 ```elixir
 # BAD: N+1 queries
+## Documentation & Doctests
+
+### Rules for Documentation (LLM)
+
+1. **ALWAYS add `@moduledoc`** to every public module — `@moduledoc false` for internal/private modules
+2. **ALWAYS add `@doc` and `@spec`** to every public function — `@doc false` for intentionally undocumented helpers
+3. **ALWAYS start `@moduledoc` and `@doc` with a concise summary line** — ExDoc uses the first paragraph for search/index
+4. **ALWAYS include `## Examples` with `iex>` doctests** for pure functions
+5. **ALWAYS place `@doc` before the FIRST clause** of multi-clause functions
+6. **ALWAYS pair `@deprecated` with `@doc false`** — hide deprecated functions from docs
+7. **NEVER write docs that just repeat the function name**
+8. **ALWAYS use backtick cross-references** — `` `Module` ``, `` `Module.function/arity` ``, `` `t:type/0` ``
+9. **ALWAYS document `:ok/:error` return shapes** explicitly
+10. **PREFER `@typedoc`** for complex or important types
+
+### Key Pattern
+
+```elixir
+@doc """
+Fetches a user by ID, preloading their organization.
+
+Returns `{:ok, user}` if found, `{:error, :not_found}` otherwise.
+
+## Examples
+
+    iex> MyApp.Accounts.get_user(123)
+    {:ok, %User{id: 123}}
+
+"""
+@spec get_user(pos_integer()) :: {:ok, User.t()} | {:error, :not_found}
+def get_user(id), do: ...
+```
+
+### Common @spec Patterns
+
+```elixir
+@spec process(String.t()) :: {:ok, map()} | {:error, atom()}
+@spec transform(list(A)) :: list(A) when A: term()          # Parametric
+@spec callback(term(), keyword()) :: :ok | no_return()       # Side-effectful
+@type result :: {:ok, t()} | {:error, reason()}              # Reusable type
+@type reason :: :not_found | :unauthorized | :invalid_input
+```
+
+> **Deep dive:** [documentation.md](documentation.md) — @moduledoc/@doc full patterns, @typedoc/@opaque types,
+> @since/@deprecated annotations, doctest syntax (multi-line, exceptions, opaque values, ellipsis matching
+> in 1.19+, omitting output), ExDoc configuration (groups_for_modules, extras, source_url, groups_for_docs),
+> cross-reference syntax (`t:MyMod.t/0`, `c:callback/1`, `m:Module`), documentation BAD/GOOD pairs.
+
+
 Enum.map(posts, fn p -> Repo.preload(p, :comments) end)
 # GOOD: Batch preload
 posts = Repo.all(Post) |> Repo.preload([:comments, :author])
@@ -2334,191 +2398,135 @@ def profile_changeset(user, attrs), do: cast(user, attrs, [:name]) |> ...
 > **defguard type interaction**, **Dialyzer setup and comparison** with compiler types, notation comparison
 > table, version feature summary (1.17–1.20).
 
-## Anti-Patterns to Avoid
+## Production Patterns
 
-### Imperative Habits (Most Common LLM Mistakes)
+### Telemetry (Key Pattern)
 
 ```elixir
-# BAD: Enum.each to build result (returns :ok, not accumulated value)
-result = []
-Enum.each(items, fn item -> result = [process(item) | result] end)
-# result is still [] — rebinding doesn't work!
+# Emit events
+:telemetry.execute([:my_app, :orders, :created], %{count: 1}, %{order_id: order.id})
 
-# GOOD: Use Enum.map
-result = Enum.map(items, &process/1)
+# Instrument a block
+:telemetry.span([:my_app, :external_api], %{url: url}, fn ->
+  result = HTTPClient.get(url)
+  {result, %{status: result.status}}
+end)
+```
 
-# BAD: if/else chain for structural dispatch
-def handle(msg) do
-  if is_map(msg) and Map.has_key?(msg, :type) do
-    if msg.type == :error, do: handle_error(msg), else: handle_ok(msg)
-  end
-end
+### HTTP Clients
 
-# GOOD: Multi-clause functions
-def handle(%{type: :error} = msg), do: handle_error(msg)
-def handle(%{type: _} = msg), do: handle_ok(msg)
+**Req** is the modern default. Batteries included: JSON, retries, redirects, compression.
 
-# BAD: Mutable accumulator thinking
-count = 0
-Enum.each(items, fn _ -> count = count + 1 end)
-# count is still 0!
+```elixir
+# Simple
+resp = Req.get!("https://api.example.com/data")
 
-# GOOD: Enum.count or Enum.reduce
-count = Enum.count(items)
-count = Enum.reduce(items, 0, fn _, acc -> acc + 1 end)
+# Reusable client
+client = Req.new(base_url: "https://api.example.com", auth: {:bearer, token}, retry: :transient)
+{:ok, resp} = Req.get(client, url: "/users")
+```
 
-# BAD: String concatenation in loops
-Enum.reduce(rows, "", fn row, acc -> acc <> format(row) <> "\n" end)
+> **Deep dive:** [production.md](production.md) — telemetry deep-dive (attach handlers, span events, custom metrics),
+> built-in events table (Phoenix, Ecto, Oban, VM), metrics definitions (counter, sum, distribution, last_value),
+> HTTP client patterns (Req, Finch, middleware, retry), Req.Test mock/stub testing, reusable client construction.
 
-# GOOD: IO lists
-rows |> Enum.map(fn row -> [format(row), ?\n] end) |> IO.iodata_to_binary()
+### Elixir as NIF Host
 
-# BAD: try/rescue for expected failures
-try do
-  user = Repo.get!(User, id)
-rescue
-  Ecto.NoResultsError -> nil
-end
+When using Rust NIFs via Rustler, these Elixir-side patterns are critical:
 
-# GOOD: ok/error pattern
-case Repo.get(User, id) do
-  nil -> {:error, :not_found}
-  user -> {:ok, user}
+**Config-driven module swapping (test/prod):**
+```elixir
+# config/config.exs — default to real NIF
+config :my_app, native_module: MyApp.Native
+
+# config/test.exs — swap to mock
+config :my_app, native_module: MyApp.MockNative
+
+# In your context module — resolve at compile time
+defmodule MyApp.Node do
+  @native Application.compile_env!(:my_app, :native_module)
+
+  def start(config), do: @native.start(config)
 end
 ```
 
-### Process & OTP Anti-Patterns
+**`Application.compile_env` vs `Application.get_env`:**
+- `compile_env` — inlined at compile time, Dialyzer can see the concrete module. Use for module swapping where you want compile-time guarantees.
+- `get_env` — resolved at runtime. Use when the value might change or when compile-time resolution isn't needed.
+- **Dialyzer caveat:** `compile_env` gives Dialyzer the concrete module type, so specs are checked. `get_env` returns `term()`, losing type info.
 
+**Atom vs string keys across the NIF boundary:**
 ```elixir
-# BAD: GenServer as bottleneck for reads
-def get(key), do: GenServer.call(__MODULE__, {:get, key})
-# GOOD: Direct ETS access
-def get(key), do: :ets.lookup(__MODULE__, key)
+# BAD: Elixir maps with atom keys sent to Rust NifMap
+config = %{host: "localhost", port: 4001}
+# Rust NifMap expects string keys by default — runtime crash!
 
-# BAD: Partial state update (crash between steps corrupts state)
-def handle_call(:transfer, _from, state) do
-  state = update_in(state.account_a, &(&1 - 100))
-  external_api_call()  # May crash here!
-  state = update_in(state.account_b, &(&1 + 100))
-  {:reply, :ok, state}
+# GOOD: Convert atom keys to strings before crossing the NIF boundary
+config = %{"host" => "localhost", "port" => 4001}
+
+# GOOD: Or use a NifStruct with a matching Elixir struct
+config = %MyApp.Config{host: "localhost", port: 4001}
+```
+
+**Mock behaviour pattern for NIFs:**
+```elixir
+# Define a behaviour for the NIF interface
+defmodule MyApp.NativeBehaviour do
+  @callback start(map()) :: {:ok, reference()} | {:error, String.t()}
+  @callback stop(reference()) :: :ok
 end
-# GOOD: Atomic state update
-def handle_call(:transfer, _from, state) do
-  :ok = external_api_call()
-  new_state = state |> update_in([:account_a], &(&1 - 100)) |> update_in([:account_b], &(&1 + 100))
-  {:reply, :ok, new_state}
+
+# Real implementation loads the NIF
+defmodule MyApp.Native do
+  @behaviour MyApp.NativeBehaviour
+  use Rustler, otp_app: :my_app, crate: "my_nif"
+
+  @impl true
+  def start(_config), do: :erlang.nif_error(:nif_not_loaded)
+  @impl true
+  def stop(_ref), do: :erlang.nif_error(:nif_not_loaded)
+end
+
+# Mock for testing
+defmodule MyApp.MockNative do
+  @behaviour MyApp.NativeBehaviour
+
+  @impl true
+  def start(_config), do: {:ok, make_ref()}
+  @impl true
+  def stop(_ref), do: :ok
 end
 ```
 
-### Control Flow Anti-Patterns
+See the [rust-nif skill](../rust-nif/SKILL.md) for Rust-side NIF patterns and the return type matrix.
+
+
+## TCP/UDP Networking (Key Patterns)
+
+For socket programming with `:gen_tcp` and `:gen_udp`. Use `active: :once` for production servers, `active: false` for clients.
+
+| Active mode | Data delivery | Backpressure | Use when |
+|---|---|---|---|
+| `{active, false}` | Manual `:gen_tcp.recv/2,3` | Full control | Clients, sequential protocols |
+| `{active, :once}` | One `{:tcp, socket, data}` then pauses | Per-message | **Most production servers** |
+| `{active, N}` | N messages then `{:tcp_passive, socket}` | Batched | High throughput (OTP 17+) |
+| `{active, true}` | Unlimited messages | **NONE** | Trusted LAN, benchmarks |
 
 ```elixir
-# BAD: if/else instead of pattern matching
-def status(user), do: if user.active, do: :active, else: :inactive
-# GOOD
-def status(%{active: true}), do: :active
-def status(%{active: false}), do: :inactive
-
-# BAD: Boolean parameters obscure intent
-fetch_users(true)
-# GOOD: Separate functions with clear names
-fetch_active_users()
+# active: :once pattern — re-arm after each message
+def handle_info({:tcp, socket, data}, state) do
+  state = process_data(data, state)
+  :inet.setopts(socket, active: :once)    # Re-arm for next message
+  {:noreply, state}
+end
+def handle_info({:tcp_closed, _socket}, state), do: {:stop, :normal, state}
+def handle_info({:tcp_error, _socket, reason}, state), do: {:stop, reason, state}
 ```
 
-### Pattern Matching Gotchas
+> **Deep dive:** [networking.md](networking.md) — gen_tcp/gen_udp API reference, listener/acceptor patterns,
+> protocol framing (length-prefix, delimiter, TLV), buffer management, connection supervision,
+> UDP broadcast/multicast, Thousand Island/Ranch, BAD/GOOD pairs.
 
-```elixir
-# BAD: %{} matches ANY map, not just empty maps
-def handle(%{}), do: :empty       # Matches %{a: 1} too!
-# GOOD: Guard for empty map
-def handle(map) when map_size(map) == 0, do: :empty
-def handle(map), do: :has_keys
-
-# BAD: Atom keys don't match string keys (common with JSON/params)
-%{name: name} = %{"name" => "Jo"}  # MatchError!
-# GOOD: Match with the correct key type
-%{"name" => name} = params          # External data uses string keys
-%{name: name} = internal_map        # Internal data uses atom keys
-
-# BAD: Forgot pin — variable rebinds instead of matching
-expected = :ok
-case result do
-  expected -> :matched        # ALWAYS matches! expected rebinds to result
-end
-# GOOD: Pin to match against existing value
-case result do
-  ^expected -> :matched       # Only matches if result == :ok
-end
-```
-
-### Library & API Design Anti-Patterns
-
-```elixir
-# BAD: Non-bang function raises instead of returning error tuple
-# Users expect deliver_now/1 to return {:ok, _} | {:error, _}
-def deliver_now(email) do
-  if email.to == [] do
-    raise "no recipients"  # Surprise! Non-bang function raises
-  end
-  # ...
-end
-
-# GOOD: Non-bang returns tuples, bang raises
-def deliver_now(email) do
-  case validate_and_send(email) do
-    {:ok, result} -> {:ok, result}
-    {:error, _} = err -> err
-  end
-end
-
-def deliver_now!(email) do
-  case deliver_now(email) do
-    {:ok, result} -> result
-    {:error, reason} -> raise "Delivery failed: #{inspect(reason)}"
-  end
-end
-
-# BAD: Application.get_env in module body of a LIBRARY
-# Captures value at compile time — consumers can't configure after compilation
-defmodule MyLib.Client do
-  @api_key Application.get_env(:my_lib, :api_key)  # Baked in at compile time!
-
-  def call, do: request(@api_key)
-end
-
-# GOOD: Read at runtime for libraries
-defmodule MyLib.Client do
-  def call do
-    api_key = Application.get_env(:my_lib, :api_key)
-    request(api_key)
-  end
-end
-
-# GOOD: For application code (not libraries), compile_env is fine
-defmodule MyApp.Client do
-  @api_key Application.compile_env!(:my_app, :api_key)  # OK — you control the build
-end
-```
-
-**Rule of thumb:** Libraries use `Application.get_env` at runtime. Applications can use `Application.compile_env` at compile time. The difference: library consumers configure *after* the library is compiled; application config is set *before* compilation.
-
-### Data Structure Anti-Patterns
-
-```elixir
-# DANGEROUS: Atoms from user input (exhausts atom table ~1M limit)
-String.to_atom(user_input)
-Jason.decode!(json, keys: :atoms)
-# SAFE: to_existing_atom or explicit mapping
-String.to_existing_atom(user_input)
-Jason.decode!(json, keys: :strings)     # Default, safe
-
-# BAD: String concatenation in loops (O(n^2) — copies on every <>)
-Enum.reduce(items, "", fn i, acc -> acc <> "#{i}\n" end)
-# GOOD: IO lists (zero-copy accumulation)
-items |> Enum.map(&["Item: ", &1, "\n"]) |> IO.iodata_to_binary()
-```
-
-> **Deep dive:** [architecture-reference.md](architecture-reference.md) — full anti-patterns catalog with BAD/GOOD pairs for control flow (if/else chains, boolean params), pattern matching gotchas (empty maps, atom/string keys, keyword list order, integer/float, pin operator, IEEE 754 -0.0), cross-type comparisons (term ordering surprises), data structures (atom exhaustion, string concat), processes & OTP (GenServer bottleneck, blocking callbacks, unbounded mailbox, unsupervised processes, Task.async in GenServer), performance (N+1 queries, list as lookup table)
 
 ## State Machines
 
