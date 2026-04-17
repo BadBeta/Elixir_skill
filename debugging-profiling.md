@@ -94,7 +94,9 @@ value = dbg(expensive_computation())  # prints and returns
 iex --dbg pry -S mix
 
 # Now dbg() pauses execution like IEx.pry()
-data |> transform() |> dbg()  # Pauses here, inspect bindings
+data
+|> transform()
+|> dbg()  # Pauses here, inspect bindings
 ```
 
 **Custom dbg backend:**
@@ -506,7 +508,11 @@ MyApp.slow_function()
 Benchee.run(%{
   "Enum.map" => fn -> Enum.map(1..1000, & &1 * 2) end,
   "for comprehension" => fn -> for x <- 1..1000, do: x * 2 end,
-  "Stream.map" => fn -> 1..1000 |> Stream.map(& &1 * 2) |> Enum.to_list() end
+  "Stream.map" => fn ->
+    1..1000
+    |> Stream.map(& &1 * 2)
+    |> Enum.to_list()
+  end
 })
 
 # With inputs, memory, and reduction tracking (from Jason benchmarks)

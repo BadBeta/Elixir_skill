@@ -1157,7 +1157,10 @@ end
 def handle_info({:tcp, socket, data}, %{buffer_parts: parts} = state) do
   parts = [data | parts]
   # Only flatten when parsing:
-  buffer = parts |> Enum.reverse() |> IO.iodata_to_binary()
+  buffer =
+    parts
+    |> Enum.reverse()
+    |> IO.iodata_to_binary()
   {frames, remaining} = parse_frames(buffer)
   {:noreply, %{state | buffer_parts: [remaining]}}
 end

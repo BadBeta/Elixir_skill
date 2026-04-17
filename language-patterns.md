@@ -492,13 +492,18 @@ end
 # Design functions data-first so they compose in pipelines
 defmodule StringHelpers do
   def normalize(string) do
-    string |> String.trim() |> String.downcase() |> String.replace(~r/\s+/, " ")
+    string
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace(~r/\s+/, " ")
   end
   def truncate(string, max) when byte_size(string) <= max, do: string
   def truncate(string, max), do: String.slice(string, 0, max - 3) <> "..."
 end
 
-input |> StringHelpers.normalize() |> StringHelpers.truncate(100)
+input
+|> StringHelpers.normalize()
+|> StringHelpers.truncate(100)
 
 # Break long pipelines into named private functions
 def process_orders(orders) do
@@ -509,7 +514,11 @@ def process_orders(orders) do
   |> generate_invoices()
 end
 
-defp filter_valid(orders), do: orders |> Enum.filter(&valid_order?/1) |> Enum.reject(&cancelled?/1)
+defp filter_valid(orders) do
+  orders
+  |> Enum.filter(&valid_order?/1)
+  |> Enum.reject(&cancelled?/1)
+end
 defp calculate_totals(orders), do: Enum.map(orders, &%{&1 | total: calculate_order_total(&1)})
 
 # Conditional steps — use maybe_ helpers to keep pipeline flat
@@ -662,7 +671,10 @@ end
 # Simple accumulator
 for line <- File.stream!("data.csv"), reduce: %{totals: 0, count: 0} do
   acc ->
-    value = line |> String.trim() |> String.to_integer()
+    value =
+      line
+      |> String.trim()
+      |> String.to_integer()
     %{acc | totals: acc.totals + value, count: acc.count + 1}
 end
 
@@ -1934,11 +1946,17 @@ defimpl Enumerable, for: CircularBuffer do
 end
 
 # Now it works with all Enum and Stream functions:
-buf = CircularBuffer.new(5) |> CircularBuffer.push(1) |> CircularBuffer.push(2) |> CircularBuffer.push(3)
+buf =
+  CircularBuffer.new(5)
+  |> CircularBuffer.push(1)
+  |> CircularBuffer.push(2)
+  |> CircularBuffer.push(3)
 Enum.to_list(buf)          # => [1, 2, 3]
 Enum.map(buf, & &1 * 10)   # => [10, 20, 30]
 Enum.sum(buf)              # => 6
-buf |> Stream.map(& &1 * 2) |> Enum.to_list()  # => [2, 4, 6]
+buf
+|> Stream.map(& &1 * 2)
+|> Enum.to_list()  # => [2, 4, 6]
 ```
 
 **The four Enumerable callbacks:**

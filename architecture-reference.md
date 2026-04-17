@@ -403,8 +403,15 @@ Interface modules contain zero business logic. They translate input, call a doma
 # Phoenix controller
 def create(conn, %{"user" => params}) do
   case Accounts.register_user(params) do
-    {:ok, user} -> conn |> put_status(:created) |> json(UserJSON.show(user))
-    {:error, changeset} -> conn |> put_status(422) |> json(ErrorJSON.error(changeset))
+    {:ok, user} ->
+      conn
+      |> put_status(:created)
+      |> json(UserJSON.show(user))
+
+    {:error, changeset} ->
+      conn
+      |> put_status(422)
+      |> json(ErrorJSON.error(changeset))
   end
 end
 
@@ -1131,7 +1138,11 @@ Every table/schema must be owned by exactly one context. That context is the onl
 ```elixir
 # Accounts context OWNS users table — only it writes
 defmodule MyApp.Accounts do
-  def create_user(attrs), do: %User{} |> User.changeset(attrs) |> Repo.insert()
+  def create_user(attrs) do
+    %User{}
+    |> User.changeset(attrs)
+    |> Repo.insert()
+  end
   def get_user!(id), do: Repo.get!(User, id)
 end
 
@@ -1759,7 +1770,11 @@ A key architectural decision: should a process hold state in memory, or reconstr
 # Good for: CRUD, low-frequency reads, data that changes from many sources
 defmodule MyApp.Accounts do
   def get_user(id), do: Repo.get(User, id)
-  def update_user(user, attrs), do: user |> User.changeset(attrs) |> Repo.update()
+  def update_user(user, attrs) do
+    user
+    |> User.changeset(attrs)
+    |> Repo.update()
+  end
 end
 
 # STATEFUL: GenServer holds state — fast reads, single writer
@@ -2882,8 +2897,17 @@ defmodule MyApp.Catalog do
   def search_products(query), do: Product.search(query) |> Repo.all()
 
   # === Commands (writes) ===
-  def create_product(attrs), do: %Product{} |> Product.changeset(attrs) |> Repo.insert()
-  def update_product(product, attrs), do: product |> Product.changeset(attrs) |> Repo.update()
+  def create_product(attrs) do
+    %Product{}
+    |> Product.changeset(attrs)
+    |> Repo.insert()
+  end
+
+  def update_product(product, attrs) do
+    product
+    |> Product.changeset(attrs)
+    |> Repo.update()
+  end
   def delete_product(product), do: Repo.delete(product)
 end
 ```
@@ -3497,7 +3521,9 @@ Jason.decode!(json, keys: :strings)     # Default, safe
 Enum.reduce(items, "", fn i, acc -> acc <> "#{i}\n" end)
 
 # GOOD: IO lists
-items |> Enum.map(&["Item: ", &1, "\n"]) |> IO.iodata_to_binary()
+items
+|> Enum.map(&["Item: ", &1, "\n"])
+|> IO.iodata_to_binary()
 ```
 
 ### Processes & OTP
@@ -3608,13 +3634,17 @@ posts = Repo.all(Post)
 Enum.map(posts, fn p -> Repo.get(User, p.user_id) end)
 
 # GOOD: Preload
-Post |> Repo.all() |> Repo.preload(:author)
+Post
+|> Repo.all()
+|> Repo.preload(:author)
 
 # BAD: Loading large files into memory
 File.read!("huge.txt") |> String.split("\n") |> Enum.map(&process/1)
 
 # GOOD: Streaming
-File.stream!("huge.txt") |> Stream.map(&process/1) |> Enum.to_list()
+File.stream!("huge.txt")
+|> Stream.map(&process/1)
+|> Enum.to_list()
 ```
 
 ### Distribution

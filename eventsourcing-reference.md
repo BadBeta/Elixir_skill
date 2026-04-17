@@ -265,7 +265,9 @@ def before_dispatch(%Pipeline{command: command} = pipeline) do
   case validate(command) do
     :ok -> pipeline
     {:error, reason} ->
-      pipeline |> Pipeline.respond({:error, reason}) |> Pipeline.halt()
+      pipeline
+      |> Pipeline.respond({:error, reason})
+      |> Pipeline.halt()
   end
 end
 
@@ -425,9 +427,14 @@ end
 def create(conn, %{"account" => params}) do
   case MyApp.Accounts.open_account(params) do
     {:ok, account_id} ->
-      conn |> put_flash(:info, "Account created") |> redirect(to: ~p"/accounts/#{account_id}")
+      conn
+      |> put_flash(:info, "Account created")
+      |> redirect(to: ~p"/accounts/#{account_id}")
+
     {:error, reason} ->
-      conn |> put_flash(:error, inspect(reason)) |> render(:new)
+      conn
+      |> put_flash(:error, inspect(reason))
+      |> render(:new)
   end
 end
 

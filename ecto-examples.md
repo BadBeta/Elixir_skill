@@ -433,7 +433,11 @@ from a in Author, as: :author
 from p in Post,
   select: %{
     month: selected_as(fragment("date_trunc('month', ?)", p.published_at), :month),
-    total_views: p.views |> coalesce(0) |> sum() |> selected_as(:total)
+    total_views:
+      p.views
+      |> coalesce(0)
+      |> sum()
+      |> selected_as(:total)
   },
   group_by: selected_as(:month),
   order_by: selected_as(:total)
@@ -684,7 +688,11 @@ defmodule MyApp.Types.Money do
   end
 
   def dump({_currency, %Decimal{} = amount}) do
-    {:ok, amount |> Decimal.mult(100) |> Decimal.round(0) |> Decimal.to_integer()}
+    {:ok,
+     amount
+     |> Decimal.mult(100)
+     |> Decimal.round(0)
+     |> Decimal.to_integer()}
   end
   def dump(_), do: :error
 
@@ -956,7 +964,9 @@ def decrement_stock(product, quantity) do
     {:ok, product} -> {:ok, product}
     {:error, %{errors: [lock_version: _]}} ->
       # Someone else updated — reload and retry
-      product |> Repo.reload!() |> decrement_stock(quantity)
+      product
+      |> Repo.reload!()
+      |> decrement_stock(quantity)
     {:error, changeset} -> {:error, changeset}
   end
 end

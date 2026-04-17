@@ -87,7 +87,9 @@ end
 # GOOD: use if/else or multi-clause to ensure single return path
 def call(conn, _opts) do
   if unauthorized?(conn) do
-    conn |> send_resp(403, "Forbidden") |> halt()
+    conn
+    |> send_resp(403, "Forbidden")
+    |> halt()
   else
     do_work(conn)
   end
@@ -189,12 +191,20 @@ defmodule MyApp.StringKit do
   def truncate(str, max) when byte_size(str) <= max, do: str
   def truncate(str, max), do: String.slice(str, 0, max - 3) <> "..."
 
-  def dasherize(str), do: str |> String.downcase() |> String.replace(~r/[^\w]+/, "-")
+  def dasherize(str) do
+    str
+    |> String.downcase()
+    |> String.replace(~r/[^\w]+/, "-")
+  end
 end
 
 defmodule MyApp.ListKit do
   def compact(list), do: Enum.reject(list, &(&1 in [nil, ""]))
-  def compact_join(list, sep \\ " "), do: list |> compact() |> Enum.join(sep)
+  def compact_join(list, sep \\ " ") do
+    list
+    |> compact()
+    |> Enum.join(sep)
+  end
 
   # Multi-clause exclude handles diverse input types
   def exclude(list, nil), do: list
@@ -251,7 +261,9 @@ defmodule MyAppWeb.Plug.ResponseCache do
   end
 
   defp send_cached_response(conn, %{body: body, content_type: ct, status: status}) do
-    conn |> put_resp_content_type(ct) |> send_resp(status, body)
+    conn
+    |> put_resp_content_type(ct)
+    |> send_resp(status, body)
   end
 end
 ```
@@ -466,7 +478,9 @@ defmodule MyApp.Subscription do
 
   def unsubscribe(nil), do: false
   def unsubscribe(%__MODULE__{} = sub) do
-    sub |> change(unsubscribed_at: DateTime.utc_now()) |> Repo.update()
+    sub
+    |> change(unsubscribed_at: DateTime.utc_now())
+    |> Repo.update()
   end
 
   defp get_or_initialize(user, podcast) do
@@ -611,13 +625,19 @@ defmodule MyApp.SystemStatus do
         cores: :erlang.system_info(:logical_processors)
       },
       memory: :memsup.get_system_memory_data(),
-      uptime: :erlang.statistics(:wall_clock) |> elem(0) |> div(1000)
+      uptime:
+        :erlang.statistics(:wall_clock)
+        |> elem(0)
+        |> div(1000)
     }
   end
 
   defp read_sys_file(path) do
     case File.read(path) do
-      {:ok, content} -> content |> String.replace(<<0>>, "") |> String.trim()
+      {:ok, content} ->
+        content
+        |> String.replace(<<0>>, "")
+        |> String.trim()
       _ -> nil
     end
   end
@@ -741,7 +761,9 @@ end
 
 # In FallbackController
 def call(conn, {:error, :unauthorized}) do
-  conn |> put_status(403) |> json(%{error: "Forbidden"})
+  conn
+  |> put_status(403)
+  |> json(%{error: "Forbidden"})
 end
 ```
 
@@ -1229,7 +1251,11 @@ defmodule MyApp.Notifier do
 
   defp decode(encoded) do
     case Base.decode64(encoded) do
-      {:ok, compressed} -> {:ok, compressed |> :zlib.gunzip() |> Jason.decode!()}
+      {:ok, compressed} ->
+        {:ok,
+         compressed
+         |> :zlib.gunzip()
+         |> Jason.decode!()}
       :error -> {:ok, Jason.decode!(encoded)}    # legacy uncompressed fallback
     end
   end
@@ -1286,10 +1312,15 @@ defmodule MyApp.Cron do
 
   defp parse_field("*", range), do: MapSet.new(range)
   defp parse_field("*/" <> step, range) do
-    range |> Enum.take_every(String.to_integer(step)) |> MapSet.new()
+    range
+    |> Enum.take_every(String.to_integer(step))
+    |> MapSet.new()
   end
   defp parse_field(expr, range) do
-    expr |> String.split(",") |> Enum.flat_map(&parse_part(&1, range)) |> MapSet.new()
+    expr
+    |> String.split(",")
+    |> Enum.flat_map(&parse_part(&1, range))
+    |> MapSet.new()
   end
 
   defp parse_part(part, range) do

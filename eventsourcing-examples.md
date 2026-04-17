@@ -232,7 +232,9 @@ defmodule MyApp.Middleware.Validation do
       case command.__struct__.validate(command) do
         :ok -> pipeline
         {:error, reason} ->
-          pipeline |> Pipeline.respond({:error, reason}) |> Pipeline.halt()
+          pipeline
+          |> Pipeline.respond({:error, reason})
+          |> Pipeline.halt()
       end
     else
       pipeline

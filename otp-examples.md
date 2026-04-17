@@ -2532,7 +2532,9 @@ defmodule MyApp.ConfigHydrator do
   end
 
   defp hydrate({:file, path}) do
-    path |> File.read!() |> Jason.decode!()
+    path
+    |> File.read!()
+    |> Jason.decode!()
     |> Enum.each(fn {k, v} -> MyApp.ConfigStorage.put(String.to_atom(k), v) end)
   end
 end

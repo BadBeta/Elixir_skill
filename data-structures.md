@@ -104,7 +104,9 @@ list = [new_item | existing_list]
 Enum.reduce(items, [], fn item, acc -> acc ++ [item] end)
 
 # GOOD: prepend then reverse = O(n) total
-items |> Enum.reduce([], fn item, acc -> [item | acc] end) |> Enum.reverse()
+items
+|> Enum.reduce([], fn item, acc -> [item | acc] end)
+|> Enum.reverse()
 
 # BEST: just use Enum.map if transforming
 Enum.map(items, &transform/1)

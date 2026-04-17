@@ -148,7 +148,9 @@ setup :set_mox_from_context      # Auto-selects private/global based on async ta
 # Expectations
 expect(Mock, :func, fn arg -> result end)          # Expect 1 call
 expect(Mock, :func, 3, fn arg -> result end)       # Expect exactly 3 calls
-Mock |> expect(:a, fn -> :a end) |> expect(:b, fn -> :b end)  # Chain
+Mock
+|> expect(:a, fn -> :a end)
+|> expect(:b, fn -> :b end)  # Chain
 
 # Stubs (any number of calls, no verification)
 stub(Mock, :func, fn arg -> default end)
@@ -248,16 +250,33 @@ import Phoenix.LiveViewTest
 {:ok, view, html} = live(conn, ~p"/path")
 
 # Click elements
-view |> element("button#submit") |> render_click()
-view |> element("a", "Link Text") |> render_click()
-view |> element("button", "Delete") |> render_click(%{"id" => "123"})
+view
+|> element("button#submit")
+|> render_click()
+
+view
+|> element("a", "Link Text")
+|> render_click()
+
+view
+|> element("button", "Delete")
+|> render_click(%{"id" => "123"})
 
 # Forms
-view |> form("#form-id", %{field: "value"}) |> render_change()
-view |> form("#form-id", %{field: "value"}) |> render_submit()
+view
+|> form("#form-id", %{field: "value"})
+|> render_change()
+
+view
+|> form("#form-id", %{field: "value"})
+|> render_submit()
 
 # Navigation
-{:ok, conn} = view |> element("a", "Link") |> render_click() |> follow_redirect(conn)
+{:ok, conn} =
+  view
+  |> element("a", "Link")
+  |> render_click()
+  |> follow_redirect(conn)
 assert_patch(view, ~p"/users/1/edit")
 assert_redirect(view, ~p"/login")
 
@@ -448,7 +467,9 @@ mix test --stale                 # Only changed modules
 def errors_on(changeset) do
   Ecto.Changeset.traverse_errors(changeset, fn {msg, opts} ->
     Regex.replace(~r"%{(\w+)}", msg, fn _, key ->
-      opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      opts
+      |> Keyword.get(String.to_existing_atom(key), key)
+      |> to_string()
     end)
   end)
 end
@@ -601,7 +622,10 @@ end
 # Write the property before the implementation
 property "encode then decode is identity" do
   check all value <- term() do
-    assert value == value |> MyCodec.encode() |> MyCodec.decode()
+    assert value ==
+             value
+             |> MyCodec.encode()
+             |> MyCodec.decode()
   end
 end
 

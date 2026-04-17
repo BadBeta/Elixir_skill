@@ -205,7 +205,9 @@ def process(items) when is_list(items) do
 end
 
 def process(items) do
-  items |> Enum.to_list() |> process()   # General enumerable fallback
+  items
+  |> Enum.to_list()
+  |> process()   # General enumerable fallback
 end
 
 # BAD: Type check buried in function body

@@ -58,7 +58,9 @@ defmodule MyApp.DataCase do
   def errors_on(changeset) do
     Ecto.Changeset.traverse_errors(changeset, fn {message, opts} ->
       Regex.replace(~r"%{(\w+)}", message, fn _, key ->
-        opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+        opts
+      |> Keyword.get(String.to_existing_atom(key), key)
+      |> to_string()
       end)
     end)
   end
@@ -159,7 +161,10 @@ defmodule MyApp.Factory do
 
   def published_post_factory do
     struct!(post_factory(),
-      published_at: DateTime.utc_now() |> DateTime.add(-3600) |> DateTime.truncate(:second)
+      published_at:
+        DateTime.utc_now()
+        |> DateTime.add(-3600)
+        |> DateTime.truncate(:second)
     )
   end
 
@@ -628,7 +633,10 @@ defmodule MyApp.EncoderPropertyTest do
   # From Jason property tests — encode/decode round-trip
   property "JSON encoding is reversible for safe types" do
     check all value <- json_value() do
-      assert {:ok, ^value} = value |> Jason.encode!() |> Jason.decode()
+      assert {:ok, ^value} =
+               value
+               |> Jason.encode!()
+               |> Jason.decode()
     end
   end
 
@@ -657,7 +665,10 @@ defmodule MyApp.EncoderPropertyTest do
   # Base64 round-trip
   property "Base64 encoding is reversible" do
     check all data <- binary() do
-      assert data == data |> Base.encode64() |> Base.decode64!()
+      assert data ==
+               data
+               |> Base.encode64()
+               |> Base.decode64!()
     end
   end
 end
@@ -725,7 +736,9 @@ defmodule MyApp.ValidatorPropertyTest do
   defp non_empty_trimmed_string do
     string(:printable, min_length: 1)
     |> StreamData.filter(fn value ->
-      value |> String.trim() |> String.length() >= 1
+      value
+      |> String.trim()
+      |> String.length() >= 1
     end)
   end
 
@@ -1230,7 +1243,10 @@ defmodule MyAppWeb.UserControllerTest do
     conn = post(build_conn(), ~p"/login", user: @creds)
     assert redirected_to(conn) == ~p"/dashboard"
 
-    conn = conn |> recycle() |> get(~p"/dashboard")
+    conn =
+      conn
+      |> recycle()
+      |> get(~p"/dashboard")
     assert html_response(conn, 200) =~ "Welcome"
   end
 
@@ -1430,7 +1446,9 @@ test "returns {:error, :not_found} when user does not exist" do ... end
 def errors_on(changeset) do
   Ecto.Changeset.traverse_errors(changeset, fn {message, opts} ->
     Regex.replace(~r"%{(\w+)}", message, fn _, key ->
-      opts |> Keyword.get(String.to_existing_atom(key), key) |> to_string()
+      opts
+      |> Keyword.get(String.to_existing_atom(key), key)
+      |> to_string()
     end)
   end)
 end

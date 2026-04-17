@@ -330,7 +330,10 @@ List.keysort(list, 0)            # Sort by tuple position
 
 ```elixir
 # List.wrap for defensive normalization (very common)
-items = opts |> Keyword.get(:items) |> List.wrap()
+items =
+  opts
+  |> Keyword.get(:items)
+  |> List.wrap()
 
 # Prepend (O(1)) then reverse — idiomatic accumulation
 Enum.reduce(items, [], fn item, acc -> [transform(item) | acc] end)
@@ -623,7 +626,10 @@ IO.warn("deprecation")          # Print to stderr
 # Debug (returns the value — use in pipelines!)
 IO.inspect(value)               # Print and return value
 IO.inspect(value, label: "step1")  # With label
-value |> IO.inspect(label: "before") |> transform() |> IO.inspect(label: "after")
+value
+|> IO.inspect(label: "before")
+|> transform()
+|> IO.inspect(label: "after")
 
 # IO data (list of strings/bytes — avoids concatenation)
 iodata = ["Hello", ?\s, "World", [" ", "!"]]
@@ -887,7 +893,9 @@ case value do
 end
 
 # Chunk with ranges (index-based)
-list |> Enum.with_index() |> Enum.filter(fn {_, i} -> i in 0..4 end)
+list
+|> Enum.with_index()
+|> Enum.filter(fn {_, i} -> i in 0..4 end)
 ```
 
 ### Agent Quick Reference
