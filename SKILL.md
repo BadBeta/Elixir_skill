@@ -145,7 +145,10 @@ end
 **3. `Map.values |> Enum.filter` → `for` comprehension:**
 ```elixir
 # BAD — builds intermediate list, then filters
-active = map |> Map.values() |> Enum.filter(& &1.active?)
+active =
+  map
+  |> Map.values()
+  |> Enum.filter(& &1.active?)
 
 # GOOD — single pass with pattern match
 active = for {_k, %{active?: true} = v} <- map, do: v
@@ -516,13 +519,18 @@ String.upcase(name)
 # Design functions data-first so they compose in pipelines
 defmodule StringHelpers do
   def normalize(string) do
-    string |> String.trim() |> String.downcase() |> String.replace(~r/\s+/, " ")
+    string
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace(~r/\s+/, " ")
   end
   def truncate(string, max) when byte_size(string) <= max, do: string
   def truncate(string, max), do: String.slice(string, 0, max - 3) <> "..."
 end
 
-input |> StringHelpers.normalize() |> StringHelpers.truncate(100)
+input
+|> StringHelpers.normalize()
+|> StringHelpers.truncate(100)
 
 # Break long pipelines into named private functions
 def process_orders(orders) do
@@ -533,7 +541,11 @@ def process_orders(orders) do
   |> generate_invoices()
 end
 
-defp filter_valid(orders), do: orders |> Enum.filter(&valid_order?/1) |> Enum.reject(&cancelled?/1)
+defp filter_valid(orders) do
+  orders
+  |> Enum.filter(&valid_order?/1)
+  |> Enum.reject(&cancelled?/1)
+end
 defp calculate_totals(orders), do: Enum.map(orders, &%{&1 | total: calculate_order_total(&1)})
 
 # Conditional steps — use maybe_ helpers to keep pipeline flat
@@ -820,7 +832,9 @@ count = Enum.reduce(items, 0, fn _, acc -> acc + 1 end)
 Enum.reduce(rows, "", fn row, acc -> acc <> format(row) <> "\n" end)
 
 # GOOD: IO lists
-rows |> Enum.map(fn row -> [format(row), ?\n] end) |> IO.iodata_to_binary()
+rows
+|> Enum.map(fn row -> [format(row), ?\n] end)
+|> IO.iodata_to_binary()
 
 # BAD: try/rescue for expected failures
 try do
@@ -854,7 +868,10 @@ end
 # GOOD: Atomic state update
 def handle_call(:transfer, _from, state) do
   :ok = external_api_call()
-  new_state = state |> update_in([:account_a], &(&1 - 100)) |> update_in([:account_b], &(&1 + 100))
+  new_state =
+    state
+    |> update_in([:account_a], &(&1 - 100))
+    |> update_in([:account_b], &(&1 + 100))
   {:reply, :ok, new_state}
 end
 ```
@@ -964,7 +981,9 @@ Jason.decode!(json, keys: :strings)     # Default, safe
 # BAD: String concatenation in loops (O(n^2) — copies on every <>)
 Enum.reduce(items, "", fn i, acc -> acc <> "#{i}\n" end)
 # GOOD: IO lists (zero-copy accumulation)
-items |> Enum.map(&["Item: ", &1, "\n"]) |> IO.iodata_to_binary()
+items
+|> Enum.map(&["Item: ", &1, "\n"])
+|> IO.iodata_to_binary()
 ```
 
 > **Deep dive:** [architecture-reference.md](architecture-reference.md) — full anti-patterns catalog with BAD/GOOD pairs for control flow (if/else chains, boolean params), pattern matching gotchas (empty maps, atom/string keys, keyword list order, integer/float, pin operator, IEEE 754 -0.0), cross-type comparisons (term ordering surprises), data structures (atom exhaustion, string concat), processes & OTP (GenServer bottleneck, blocking callbacks, unbounded mailbox, unsupervised processes, Task.async in GenServer), performance (N+1 queries, list as lookup table)
@@ -1366,7 +1385,11 @@ defmodule MyApp.Plugin do
     quote do
       @behaviour MyApp.Plugin
       @impl true
-      def name, do: __MODULE__ |> Module.split() |> List.last()
+      def name do
+        __MODULE__
+        |> Module.split()
+        |> List.last()
+      end
       defoverridable name: 0  # Implementers MAY override
     end
   end
@@ -1746,6 +1769,13 @@ name |> String.upcase()
 # GOOD: Direct call
 String.upcase(name)
 
+# BAD: Multi-step pipeline on one line
+list |> Enum.map(&process/1) |> Enum.sum()
+# GOOD: One pipe per line, always
+list
+|> Enum.map(&process/1)
+|> Enum.sum()
+
 # BAD: Piping to anonymous function
 data |> (fn x -> x * 2 end).()
 # GOOD: Use then/1
@@ -2044,10 +2074,14 @@ def process([_ | _] = list), do: ...
 # BAD: O(n) append in loops = O(n^2)
 Enum.reduce(items, [], fn item, acc -> acc ++ [item] end)
 # GOOD: prepend then reverse = O(n)
-items |> Enum.reduce([], fn item, acc -> [item | acc] end) |> Enum.reverse()
+items
+|> Enum.reduce([], fn item, acc -> [item | acc] end)
+|> Enum.reverse()
 
 # IO lists — fastest way to build output (zero-copy accumulation)
-rows |> Enum.map(fn row -> [format(row), ?\n] end) |> IO.iodata_to_binary()
+rows
+|> Enum.map(fn row -> [format(row), ?\n] end)
+|> IO.iodata_to_binary()
 File.write!("out.txt", Enum.map(rows, &[&1, ?\n]))  # IO functions accept IO lists directly
 ```
 
@@ -2269,7 +2303,11 @@ import Ecto.Query
 def published(query \\ Post), do: from(p in query, where: p.status == :published)
 def by_author(query, id), do: from(p in query, where: p.author_id == ^id)
 def recent(query), do: from(p in query, order_by: [desc: p.published_at])
-Post |> published() |> by_author(user_id) |> recent() |> Repo.all()
+Post
+|> published()
+|> by_author(user_id)
+|> recent()
+|> Repo.all()
 
 # Joins and preloads
 from(p in Post,
@@ -2297,7 +2335,10 @@ users = Repo.all(User)
 Enum.map(users, fn u -> u.posts end)  # N+1!
 
 # GOOD: Preload
-users = User |> preload(:posts) |> Repo.all()
+users =
+  User
+  |> preload(:posts)
+  |> Repo.all()
 ```
 
 ## Testing
@@ -2685,7 +2726,10 @@ data
 
 ```elixir
 # Prints expression + result for each pipeline step
-data |> step_one() |> step_two() |> dbg()
+data
+|> step_one()
+|> step_two()
+|> dbg()
 ```
 
 ### IEx.pry
