@@ -88,6 +88,9 @@ Check this table BEFORE writing control flow or collection operations:
 | Swap implementation for test/prod | `@callback` behaviour | `if Mix.env() == :test` |
 | Expose module's function unchanged | `defdelegate` | copy-paste wrapper |
 | Check if map key exists (nil valid) | `Map.fetch/2` | `map[:key] != nil` |
+| Single transformation on a value | Direct call: `Enum.map(list, &f/1)` | `list \|> Enum.map(&f/1)` |
+| 2+ transformations on same data | Pipeline: `data \|> step1() \|> step2()` | Nested calls: `step2(step1(data))` |
+| try/rescue needed in a callback | Extract to named `safe_x/1` function | Inline `try do ... rescue` in lambda |
 
 ### try / catch / rescue Decision
 
@@ -99,7 +102,7 @@ Check this table BEFORE writing control flow or collection operations:
 | Error is an expected business case? | Return `{:ok,_}/{:error,_}` from the function |
 | Everything else? | Let it crash — supervisor handles it |
 
-### Top 5 Anti-Patterns (BAD/GOOD)
+### Top Anti-Patterns (BAD/GOOD)
 
 **1. `if` for structural dispatch → multi-clause function:**
 ```elixir
@@ -187,6 +190,45 @@ if value != nil, do: use_timeout(value), else: use_default()
 case Map.fetch(config, :timeout) do
   {:ok, timeout} -> use_timeout(timeout)
   :error -> use_default()
+end
+```
+
+**7. Single-step pipe → direct function call:**
+```elixir
+# BAD — pipe adds nothing for a single step
+items |> Enum.map(&process/1)
+result |> IO.write()
+
+# GOOD — direct call is clearer for one step
+Enum.map(items, &process/1)
+IO.write(result)
+
+# GOOD — 2+ steps justify a pipeline
+items
+|> Enum.map(&process/1)
+|> Enum.sum()
+```
+
+**8. try/rescue buried in lambda → extract to named function:**
+```elixir
+# BAD — rescue hidden inside Enum callback, silently swallows errors
+Enum.map(items, fn item ->
+  try do
+    process(item)
+  rescue
+    _ -> nil
+  end
+end)
+
+# GOOD — named function makes fault isolation visible and testable
+Enum.map(items, &safe_process/1)
+
+defp safe_process(item) do
+  process(item)
+rescue
+  e ->
+    Logger.warning("process failed: #{Exception.message(e)}")
+    nil
 end
 ```
 
