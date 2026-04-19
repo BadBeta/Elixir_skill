@@ -957,6 +957,14 @@ defp validate_mode!(other), do: raise ArgumentError, "unknown mode: #{inspect(ot
 
 **Magic number defaults in structs (use module attributes):**
 ```elixir
+# BAD: identity case — returns its own input unchanged
+mode = case config.mode do
+  :async -> :async
+  :sync -> :sync
+end
+# GOOD: assign directly (validation happened earlier or use guard)
+mode = config.mode
+
 # BAD: default repeated in struct definition and constructor
 defstruct [timeout: 5_000, max_retries: 3]
 

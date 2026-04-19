@@ -112,6 +112,35 @@ end
 
 ## gen_statem Callbacks
 
+### Connection Example (state_functions + state_enter)
+
+```elixir
+defmodule MyApp.Connection do
+  @behaviour :gen_statem
+
+  def start_link(opts), do: :gen_statem.start_link(__MODULE__, opts, [])
+  def connect(pid), do: :gen_statem.call(pid, :connect)
+
+  @impl true
+  def init(opts), do: {:ok, :disconnected, %{host: opts[:host], retries: 0}}
+  @impl true
+  def callback_mode, do: [:state_functions, :state_enter]
+
+  def disconnected(:enter, _old, data), do: {:keep_state, %{data | retries: 0}}
+  def disconnected({:call, from}, :connect, data),
+    do: {:next_state, :connecting, data, [{:reply, from, :ok}]}
+
+  def connecting(:enter, _old, data) do
+    send(self(), :do_connect)
+    {:keep_state_and_data, [{:state_timeout, 5000, :connect_timeout}]}
+  end
+end
+```
+
+**Timeout types:** `{:timeout, ms, event}` (any event cancels), `{:state_timeout, ms, event}` (state change cancels), `{{:timeout, name}, ms, event}` (named, cross-state).
+
+### Callback Reference
+
 ```elixir
 @impl true
 def callback_mode do

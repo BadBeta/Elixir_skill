@@ -595,24 +595,6 @@ else
   {:error, :not_found} -> {:error, "User not found"}
   {:error, :insufficient} -> {:error, "Insufficient funds"}
 end
-
-# ok/error pipeline — chain with pattern-matching helpers
-defp authorize(user, action) do
-  user
-  |> check_role(action)
-  |> check_permissions(action)
-  |> check_rate_limit()
-end
-
-defp check_role(%{role: :admin} = user, _action), do: {:ok, user}
-defp check_role(%{role: :user} = user, :read), do: {:ok, user}
-defp check_role(_, action), do: {:error, {:unauthorized, action}}
-
-defp check_permissions({:ok, user}, action), do: Permissions.verify(user, action)
-defp check_permissions(error, _action), do: error
-
-defp check_rate_limit({:ok, user}), do: RateLimiter.check(user)
-defp check_rate_limit(error), do: error
 ```
 
 ### Multi-Clause Anonymous Functions
@@ -737,18 +719,6 @@ else
   {:save, {:error, changeset}} -> {:error, changeset}
 end
 
-# Filtering ok results from a list
-results = Enum.map(items, &process/1)
-successes = for {:ok, val} <- results, do: val
-failures = for {:error, reason} <- results, do: reason
-
-# ok/error in GenServer — pass through the tuple
-def handle_call(:get, _from, state) do
-  case compute(state) do
-    {:ok, result} -> {:reply, {:ok, result}, state}
-    {:error, _} = err -> {:reply, err, state}  # Capture and forward
-  end
-end
 ```
 
 **When to use which:**
@@ -1182,37 +1152,11 @@ def start(_type, _args) do
   Supervisor.start_link(children, strategy: :one_for_one, name: MyApp.Supervisor)
 end
 
-# Infrastructure: if Repo crashes, PubSub restarts too (depends on Repo)
-defmodule MyApp.InfrastructureSupervisor do
-  use Supervisor
-  def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
-  def init(_arg) do
-    children = [
-      MyApp.Repo,
-      {Phoenix.PubSub, name: MyApp.PubSub}
-    ]
-    Supervisor.init(children, strategy: :rest_for_one)
-  end
-end
-
-# Domain: CurrentRow (ETS owner) must be alive for ListenerManager
-defmodule MyApp.DomainSupervisor do
-  use Supervisor
-  def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
-  def init(_arg) do
-    children = [
-      MyApp.Readings.CurrentRow,
-      MyApp.Sensors.ListenerManager
-    ]
-    Supervisor.init(children, strategy: :rest_for_one)
-  end
-end
-
-# Tightly coupled pair — if either dies, both restart
-# Pattern from Postgrex: Registry must exist before DynamicSupervisor
+# Each sub-supervisor is a standard Supervisor module with its own strategy:
 defmodule MyApp.WorkerPoolSupervisor do
   use Supervisor
   def start_link(arg), do: Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
+
   def init(_arg) do
     children = [
       {Registry, keys: :unique, name: MyApp.WorkerRegistry},
@@ -1374,34 +1318,6 @@ defmodule MyApp.Mailer.Dispatcher do
 end
 ```
 
-### Behaviour + `use` Macro — Inject Defaults
-
-```elixir
-defmodule MyApp.Plugin do
-  @callback handle(term()) :: {:ok, term()} | {:error, term()}
-  @callback name() :: String.t()
-
-  defmacro __using__(_opts) do
-    quote do
-      @behaviour MyApp.Plugin
-      @impl true
-      def name do
-        __MODULE__
-        |> Module.split()
-        |> List.last()
-      end
-      defoverridable name: 0  # Implementers MAY override
-    end
-  end
-end
-
-defmodule MyApp.Plugins.CSV do
-  use MyApp.Plugin  # Gets default name/0, must implement handle/1
-  @impl true
-  def handle(data), do: {:ok, CSV.encode(data)}
-end
-```
-
 ### Behaviour vs Protocol Decision
 
 | | Behaviour | Protocol |
@@ -1457,12 +1373,6 @@ defprotocol MyApp.Blank do
 end
 
 defimpl MyApp.Blank, for: Any do
-  def blank?(_), do: false  # Default: nothing is blank
-end
-
-defimpl MyApp.Blank, for: [BitString, List] do
-  def blank?(""), do: true
-  def blank?([]), do: true
   def blank?(_), do: false
 end
 ```
@@ -1627,32 +1537,6 @@ end
 > with B listed before A. Both processes may be in their own `handle_continue` simultaneously —
 > the call will block until B's callback completes.
 
-### gen_statem (State Machines)
-
-```elixir
-defmodule MyApp.Connection do
-  @behaviour :gen_statem
-
-  def start_link(opts), do: :gen_statem.start_link(__MODULE__, opts, [])
-  def connect(pid), do: :gen_statem.call(pid, :connect)
-
-  @impl true
-  def init(opts), do: {:ok, :disconnected, %{host: opts[:host], retries: 0}}
-  @impl true
-  def callback_mode, do: [:state_functions, :state_enter]
-
-  def disconnected(:enter, _old, data), do: {:keep_state, %{data | retries: 0}}
-  def disconnected({:call, from}, :connect, data), do: {:next_state, :connecting, data, [{:reply, from, :ok}]}
-
-  def connecting(:enter, _old, data) do
-    send(self(), :do_connect)
-    {:keep_state_and_data, [{:state_timeout, 5000, :connect_timeout}]}
-  end
-end
-```
-
-**Timeout types:** `{:timeout, ms, event}` (any event cancels), `{:state_timeout, ms, event}` (state change cancels), `{{:timeout, name}, ms, event}` (named, cross-state).
-
 ### Task.Supervisor Patterns
 
 ```elixir
@@ -1683,50 +1567,9 @@ end
 :ets.new(:stats, [:named_table, :public, write_concurrency: true])
 :ets.update_counter(:stats, :requests, {2, 1}, {:requests, 0})  # increment by 1, default 0
 
-# Match specs — server-side filtering (faster than lookup + Enum.filter)
-# Find all users with age > 30: table has {name, age, email}
-:ets.select(:users, [{{:"$1", :"$2", :"$3"}, [{:>, :"$2", 30}], [{{:"$1", :"$3"}}]}])
-# Returns [{name, email}] for matching rows
-
-# Simpler: match_object with partial tuple
-:ets.match_object(:cache, {:_, :active, :_})  # all tuples with :active in position 2
-
-# Delete matching entries
-:ets.select_delete(:cache, [{{:_, :"$1", :_}, [{:<, :"$1", expired_at}], [true]}])
 ```
 
 Use ETS instead of GenServer for read-heavy workloads to avoid bottlenecks. Use `write_concurrency: true` when multiple processes write to different keys.
-
-### Graceful Shutdown
-
-```elixir
-defmodule MyApp.Worker do
-  use GenServer
-
-  def init(opts) do
-    Process.flag(:trap_exit, true)  # Required to get terminate/2 callback
-    {:ok, %{conn: connect(opts)}}
-  end
-
-  @impl true
-  def terminate(_reason, %{conn: conn}) do
-    # Called on shutdown — drain connections, flush queues, close resources
-    Logger.info("Shutting down, closing connection...")
-    close(conn)
-    :ok  # Return value ignored
-  end
-end
-```
-
-### Process Bottleneck Detection
-
-```elixir
-# Quick check — find processes with large mailboxes
-for pid <- Process.list(),
-    {:message_queue_len, len} = Process.info(pid, :message_queue_len),
-    len > 1000,
-    do: {pid, len, Process.info(pid, :registered_name)}
-```
 
 ### Call vs Cast Decision
 
@@ -1907,21 +1750,6 @@ orders
 |> Stream.reject(&(&1.total == 0))
 |> Enum.sum()                     # Enum call triggers the lazy pipeline
 
-# Stream.chunk_while — variable-size chunks with custom logic
-# Group log lines into multi-line entries (entry starts with timestamp)
-File.stream!("app.log")
-|> Stream.chunk_while([], fn
-  line, [] -> {:cont, [line]}
-  <<d, _::binary>> = line, acc when d in ?0..?9 -> {:cont, Enum.reverse(acc), [line]}
-  line, acc -> {:cont, [line | acc]}
-end, fn acc -> {:cont, Enum.reverse(acc), []} end)
-
-# Stream.transform — stateful stream transformation
-# Rate-limit: emit at most 10 items per second
-Stream.transform(items, fn -> :ok end, fn item, acc ->
-  Process.sleep(100)
-  {[item], acc}
-end, fn _acc -> :ok end)
 ```
 
 > **Deep dive:** [language-patterns.md](language-patterns.md) — Enumerable protocol implementation (reduce/3,
@@ -1952,16 +1780,6 @@ defp sum([head | tail], acc), do: sum(tail, acc + head)
 def transform(list), do: do_transform(list, [])
 defp do_transform([], acc), do: Enum.reverse(acc)
 defp do_transform([h | t], acc), do: do_transform(t, [process(h) | acc])
-
-# Multiple accumulators
-def partition(list), do: partition(list, [], [])
-defp partition([], evens, odds), do: {Enum.reverse(evens), Enum.reverse(odds)}
-defp partition([h | t], evens, odds) do
-  if rem(h, 2) == 0,
-    do: partition(t, [h | evens], odds),
-    else: partition(t, evens, [h | odds])
-end
-# But prefer: Enum.split_with(list, &(rem(&1, 2) == 0))
 
 # Tree traversal (recursion is the right tool)
 def flatten_tree(%{children: children, value: value}) do
@@ -2499,27 +2317,6 @@ def get_user(id), do: ...
 > in 1.19+, omitting output), ExDoc configuration (groups_for_modules, extras, source_url, groups_for_docs),
 > cross-reference syntax (`t:MyMod.t/0`, `c:callback/1`, `m:Module`), documentation BAD/GOOD pairs.
 
-
-Enum.map(posts, fn p -> Repo.preload(p, :comments) end)
-# GOOD: Batch preload
-posts = Repo.all(Post) |> Repo.preload([:comments, :author])
-
-# BAD: TOCTOU race
-case Repo.get_by(Post, slug: slug) do
-  nil -> Repo.insert(%Post{slug: slug})
-  post -> Repo.update(Post.changeset(post, attrs))
-end
-# GOOD: Atomic upsert
-Repo.insert(%Post{slug: slug, title: title},
-  on_conflict: [set: [title: title]], conflict_target: :slug)
-
-# BAD: God changeset
-def changeset(user, attrs), do: cast(user, attrs, [:name, :email, :password, :role, :admin_notes])
-# GOOD: Separate changesets per action
-def registration_changeset(user, attrs), do: cast(user, attrs, [:name, :email, :password]) |> ...
-def profile_changeset(user, attrs), do: cast(user, attrs, [:name]) |> ...
-```
-
 ## Type System (Elixir 1.17–1.20)
 
 ### Rules for Working with the Type System (LLM)
@@ -2815,20 +2612,7 @@ mix archdo --only 4.17,6.12         # run specific rules
 mix archdo --freeze                 # baseline existing violations
 ```
 
-**Two-layer review workflow:** When reviewing an Elixir project, ALWAYS use this approach:
-1. **Layer 1:** Run `mix archdo` for mechanical structural analysis
-2. **Layer 2:** Load this skill and the relevant subskills to evaluate each finding with domain knowledge. Consult these subskills based on finding category:
-   - OTP rules (5.x) → `otp-reference.md`, `otp-examples.md`, `otp-advanced.md`
-   - Architecture/boundary rules (1.x, 4.x) → `architecture-reference.md`
-   - Error handling rules (6.9-6.11) → `language-patterns.md` (error handling section)
-   - Testing rules (7.x) → use the `elixir-testing` skill
-   - Ecto/schema rules → `ecto-reference.md`, `ecto-examples.md`
-   - Event sourcing rules (8.x) → use the `event-sourcing` skill
-   - NIF rules (11.x) → use the `rust-nif` skill
-
-Not every finding needs fixing — some are deliberate architectural choices. The subskills provide the context to distinguish real issues from intentional trade-offs.
-
-**Key rule categories:** Boundaries (1.x), Duplication (3.x), Abstraction/Seams (4.x), OTP (5.x), Module Quality (6.x), Testing (7.x), Event Sourcing (8.x), NIF Safety (11.x).
+**Two-layer review:** Run `mix archdo` for mechanical analysis, then use this skill's subskills to evaluate each finding with domain knowledge. Not every finding needs fixing — some are deliberate architectural choices.
 
 ### mix format
 
@@ -2867,20 +2651,6 @@ recompile         # Recompile project
 s Enum.map/2      # Show @spec
 t String          # Show @type
 exports Module    # List public functions
-```
-
-### .iex.exs Configuration
-
-```elixir
-import Ecto.Query
-alias MyApp.{Repo, User}
-
-defmodule H do
-  def u(id), do: Repo.get(User, id)
-end
-
-import H
-IO.puts("Helpers: u(id)")
 ```
 
 ### Production Remote Shell
