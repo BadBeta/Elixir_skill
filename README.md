@@ -1,3 +1,5 @@
+# This has been superseded by [elixir-phase-skills](https://github.com/BadBeta/elixir-phase-skills)
+
 # Elixir skill for Claude
 
 This is a rather ambitious project to make Claude do idiomatic Elixir both in architecture and code. The skill has a hub structure with a core skill aiming to cover the most crucial and daily bits, and with referenced supporting files covering more specialized topics. Only the core skill is loaded into the context when the skill is invoked. 
